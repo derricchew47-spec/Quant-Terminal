@@ -1,256 +1,814 @@
-# ============================================================================
-# QuantumSignal PRO | 整合优化版 (Pro 2 引擎 + 旧版经典架构)
-# ============================================================================
-
-from dataclasses import dataclass, asdict
-import math
-import html
-import numpy as np
-import pandas as pd
 import streamlit as st
+import pandas as pd
+import numpy as np
+import yfinance as yf
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import yfinance as yf
+import sqlite3
+from datetime import datetime
+import io
 
-# ----------------------------------------------------------------------------
-# 1. 核心风控配置与数据清洗
-# ----------------------------------------------------------------------------
-VERSION = '2.1.0-Integrated'
+# -----------------------------------------------------------------------------
+# 1. 页面配置与移动端轻量级极简视觉 (Cyberpunk Dark Theme) - 保持 Quantum One UI 框架
+# -----------------------------------------------------------------------------
+st.set_page_config(
+    page_title="QuantumSignal Terminal PRO",
+    page_icon="⚡",
+    layout="wide",
+    initial_sidebar_state="collapsed"
+)
 
-@dataclass(frozen=True)
-class Config:
-    rr: float = 2.0
-    risk_pct: float = 0.5
-    max_position_pct: float = 20.0
-    min_dollar_volume: float = 10_000_000
-    min_price: float = 5.0
-    max_atr_pct: float = 8.0
-    min_score: int = 65
-    fee_bps: float = 5.0
-    slip_bps: float = 5.0
+st.markdown("""
+<style>
+    @import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;600;700&display=swap');
+    
+    .stApp {
+        background-color: #0b0e14;
+        color: #c9d1d9;
+        font-family: 'Fira Code', monospace, -apple-system, sans-serif;
+    }
+    
+    .tech-header {
+        font-family: 'Fira Code', monospace;
+        font-weight: 700;
+        color: #00f0ff;
+        text-shadow: 0 0 12px rgba(0, 240, 255, 0.4);
+        margin-bottom: 15px;
+    }
+    
+    .tech-card {
+        background: #161b22;
+        border: 1px solid #30363d;
+        border-radius: 8px;
+        padding: 12px;
+        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.5);
+        margin-bottom: 10px;
+        position: relative;
+    }
+    
+    .tech-card::before {
+        content: '';
+        position: absolute;
+        top: 0; left: 0; right: 0; height: 2px;
+        background: linear-gradient(90deg, #00f0ff, #7000ff);
+        border-top-left-radius: 8px;
+        border-top-right-radius: 8px;
+    }
 
-def clean_ohlcv(frame: pd.DataFrame) -> pd.DataFrame:
+    .metric-title {
+        font-size: 11px;
+        color: #8b949e;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+    }
+
+    .metric-value-buy {
+        font-size: 18px;
+        font-weight: 700;
+        color: #00ff66;
+        text-shadow: 0 0 8px rgba(0, 255, 102, 0.3);
+    }
+
+    .metric-value-nearbuy {
+        font-size: 18px;
+        font-weight: 700;
+        color: #ccff00;
+        text-shadow: 0 0 8px rgba(204, 255, 0, 0.3);
+    }
+    
+    .metric-value-stop {
+        font-size: 18px;
+        font-weight: 700;
+        color: #ff3366;
+        text-shadow: 0 0 8px rgba(255, 51, 102, 0.3);
+    }
+    
+    .metric-value-take {
+        font-size: 18px;
+        font-weight: 700;
+        color: #00f0ff;
+        text-shadow: 0 0 8px rgba(0, 240, 255, 0.3);
+    }
+
+    /* 侧边栏按钮样式 */
+    div[data-testid="stSidebar"] .stRadio > div {
+        gap: 8px;
+    }
+
+    div[data-testid="stSidebar"] .stRadio > div > label {
+        background-color: #161b22;
+        border: 1px solid #30363d;
+        border-radius: 8px;
+        padding: 10px 12px;
+        width: 100%;
+        cursor: pointer;
+        transition: all 0.2s ease-in-out;
+    }
+
+    div[data-testid="stSidebar"] .stRadio > div > label:hover {
+        border-color: #00f0ff;
+        background-color: #1c2129;
+    }
+
+    div[data-testid="stSidebar"] .stRadio > div > label[data-checked="true"] {
+        background: linear-gradient(135deg, rgba(0, 240, 255, 0.15) 0%, rgba(112, 0, 255, 0.15) 100%);
+        border: 1.5px solid #00f0ff !important;
+    }
+
+    div[data-testid="stSidebar"] .stRadio > div > label > div:first-child {
+        display: none;
+    }
+
+    .stTextInput input, .stNumberInput input, .stSelectbox div {
+        background-color: #0b0e14 !important;
+        color: #00f0ff !important;
+        border: 1px solid #30363d !important;
+        border-radius: 6px !important;
+        font-family: 'Fira Code', monospace !important;
+    }
+
+    div.stButton > button {
+        background: linear-gradient(135deg, #00f0ff 0%, #7000ff 100%) !important;
+        color: #ffffff !important;
+        border: none !important;
+        font-weight: 700 !important;
+        border-radius: 6px !important;
+        box-shadow: 0 0 10px rgba(0, 240, 255, 0.3) !important;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# -----------------------------------------------------------------------------
+# 2. State 初始化 & 懒加载预设池字典 (接入 Pro 的自动解包机制)
+# -----------------------------------------------------------------------------
+NAV_OPTIONS = [
+    "🚀 自动扫描 & 智能推荐", 
+    "🔍 单标的全量诊断", 
+    "🧪 策略历史回测引擎", 
+    "📊 自选清单监控"
+]
+
+if 'current_page' not in st.session_state:
+    st.session_state['current_page'] = NAV_OPTIONS[0]
+if 'selected_ticker' not in st.session_state:
+    st.session_state['selected_ticker'] = "NVDA"
+if 'rr_ratio' not in st.session_state:
+    st.session_state['rr_ratio'] = 2.0
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_sp500_tickers():
+    try:
+        url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+        tables = pd.read_html(url)
+        df = tables[0]
+        tickers = df['Symbol'].str.replace('.', '-', regex=False).tolist()
+        return tickers
+    except Exception:
+        return ["AAPL", "NVDA", "INTC", "TSLA", "MSFT", "AMZN", "GOOGL", "META", "AMD", "LLY"]
+
+INDEX_PRESET_POOLS = {
+    "🔥 精选核心科技 (15只)": ["AAPL", "NVDA", "TSLA", "MSFT", "AMZN", "GOOGL", "META", "AMD", "AVGO", "PLTR", "QCOM", "SPY", "QQQ", "COIN", "SMCI"],
+    "💻 半导体与芯片产业链 (含 INTC/TSM)": ["NVDA", "AMD", "INTC", "TSM", "AVGO", "QCOM", "ASML", "MU", "TXN", "AMAT", "LRCX", "ADI", "KLAC", "ARM", "SMCI", "MRVL"],
+    "🏥 医疗生物与医药巨头": ["LLY", "NVO", "PFE", "JNJ", "UNH", "ABBV", "MRK", "AMGN", "GILD", "BMY", "CVS", "ISRG", "TMO", "DHR"],
+    "🚀 科技七巨头 & 衍生 AI 概念": ["NVDA", "AAPL", "MSFT", "AMZN", "GOOGL", "META", "TSLA", "PLTR", "ORCL", "IBM", "AMD", "NOW"],
+    "🌐 核心ETF与资产类别": ["SPY", "QQQ", "IWM", "SOXX", "XLV", "XLF", "XLE", "ARKK", "TLT", "GLD"],
+    "📊 标普 500 (S&P 500) 全量动态池": "SP500_AUTO"
+}
+
+# -----------------------------------------------------------------------------
+# 3. SQLite 本地存储
+# -----------------------------------------------------------------------------
+DB_FILE = "quant_terminal_watch.db"
+
+def init_quant_db():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS watchlist (
+            symbol TEXT PRIMARY KEY,
+            name TEXT,
+            category TEXT,
+            added_at TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+def add_to_watchlist(symbol, name, category):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO watchlist VALUES (?, ?, ?, ?)",
+              (symbol.upper().strip(), name, category, datetime.now().strftime("%Y-%m-%d")))
+    conn.commit()
+    conn.close()
+
+def get_watchlist():
+    conn = sqlite3.connect(DB_FILE)
+    df = pd.read_sql_query("SELECT * FROM watchlist", conn)
+    conn.close()
+    return df
+
+init_quant_db()
+
+# -----------------------------------------------------------------------------
+# 4. Pro 的全套数学指标计算 & Wilder 平滑算法库
+# -----------------------------------------------------------------------------
+def clean_df(frame):
     d = frame.copy()
     d.index = pd.DatetimeIndex(d.index).tz_localize(None).normalize()
     d = d.loc[~d.index.duplicated(keep='last')].sort_index()
     fields = ['Open', 'High', 'Low', 'Close', 'Volume']
-    for f in fields:
-        if f not in d.columns:
-            return pd.DataFrame()
     d = d[fields].apply(pd.to_numeric, errors='coerce').replace([np.inf, -np.inf], np.nan).dropna()
     valid = (d[fields[:4]] > 0).all(axis=1) & (d.Volume >= 0)
-    valid &= (d.High >= d[['Open', 'Close', 'Low']].max(axis=1)) & (d.Low <= d[['Open', 'Close', 'High']].min(axis=1))
+    valid &= (d.High >= d[['Open','Close','Low']].max(axis=1)) & (d.Low <= d[['Open','Close','High']].min(axis=1))
     return d.loc[valid]
 
-# ----------------------------------------------------------------------------
-# 2. PRO 2 精确数学模型（Wilder, Supertrend, Indicators, Plan）
-# ----------------------------------------------------------------------------
-def wilder_smoothing(s: pd.Series, n: int = 14) -> pd.Series:
+def wilder_smooth(s, n=14):
+    """Pro 算法：带正确的 SMA 种子 Smoothed Moving Average (Wilder)"""
     a = s.to_numpy(dtype=float)
     out = np.full(len(a), np.nan)
-    for i in range(n - 1, len(a)):
-        if i == n - 1 or np.isnan(out[i - 1]):
-            if np.isfinite(a[i - n + 1:i + 1]).all():
-                out[i] = a[i - n + 1:i + 1].mean()
+    for i in range(n-1, len(a)):
+        if i == 0 or np.isnan(out[i-1]):
+            if np.isfinite(a[i-n+1:i+1]).all():
+                out[i] = a[i-n+1:i+1].mean()
         elif np.isfinite(a[i]):
-            out[i] = (out[i - 1] * (n - 1) + a[i]) / n
+            out[i] = (out[i-1]*(n-1) + a[i])/n
     return pd.Series(out, index=s.index)
 
-def calculate_indicators(frame: pd.DataFrame, benchmark: pd.DataFrame = None) -> pd.DataFrame:
-    d = clean_ohlcv(frame)
-    if d.empty or len(d) < 50:
-        return d
-    
-    c, h, l, v = d.Close, d.High, d.Low, d.Volume
-    tr = pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
-    d['ATR'] = wilder_smoothing(tr, 14)
-    
-    for n in (20, 50, 200):
-        d[f'MA{n}'] = c.rolling(n).mean()
-    d['EMA20'] = c.ewm(span=20, adjust=False).mean()
-    
-    delta = c.diff()
-    gain = wilder_smoothing(delta.clip(lower=0), 14)
-    loss = wilder_smoothing(-delta.clip(upper=0), 14)
-    d['RSI'] = 100 - 100 / (1 + gain / loss.replace(0, np.nan))
-    d.loc[(loss == 0) & (gain > 0), 'RSI'] = 100
-    d.loc[(gain == 0) & (loss > 0), 'RSI'] = 0
-    d.loc[(gain == 0) & (loss == 0), 'RSI'] = 50
-    
-    d['MACD'] = c.ewm(span=12, adjust=False).mean() - c.ewm(span=26, adjust=False).mean()
-    d['MACDSignal'] = d.MACD.ewm(span=9, adjust=False).mean()
-    d['Hist'] = d.MACD - d.MACDSignal
-    d['CrossUp'] = (d.MACD > d.MACDSignal) & (d.MACD.shift() <= d.MACDSignal.shift())
-    d['CrossDown'] = (d.MACD < d.MACDSignal) & (d.MACD.shift() >= d.MACDSignal.shift())
-    
-    d['VWMA20'] = (((h + l + c) / 3) * v).rolling(20).sum() / v.rolling(20).sum().replace(0, np.nan)
-    d['Upper'] = d.MA20 + 2 * c.rolling(20).std()
-    d['Lower'] = d.MA20 - 2 * c.rolling(20).std()
-    d['DollarVolume'] = (c * v).rolling(20).mean()
-    d['ATRpct'] = d.ATR / c * 100
-    d['Support'] = l.rolling(20).min()
-    d['Resistance'] = h.shift().rolling(20).max()
-    d['Return63'] = c.pct_change(63, fill_method=None)
-    
-    if benchmark is not None and not benchmark.empty:
-        b = clean_ohlcv(benchmark).Close.reindex(d.index)
-        d['Relative63'] = d.Return63 - b.pct_change(63, fill_method=None)
-        d['MarketOK'] = b > b.rolling(200).mean()
-        d['MarketKnown'] = b.rolling(200).count().eq(200)
-    else:
-        d['Relative63'] = np.nan
-        d['MarketOK'] = True
-        d['MarketKnown'] = True
-        
-    # Supertrend 状态计算
-    at10 = wilder_smoothing(tr, 10).to_numpy()
-    ub = ((h + l) / 2).to_numpy() + 3 * at10
-    lb = ((h + l) / 2).to_numpy() - 3 * at10
-    fu, fl = ub.copy(), lb.copy()
-    direction = np.zeros(len(d), dtype=int)
-    line = np.full(len(d), np.nan)
-    prices = c.to_numpy()
-    
-    for i in range(len(d)):
-        if not np.isfinite(at10[i]): continue
-        if i == 0 or not np.isfinite(at10[i - 1]):
-            direction[i] = 1 if prices[i] >= (h.iloc[i] + l.iloc[i]) / 2 else -1
-        else:
-            fu[i] = ub[i] if ub[i] < fu[i - 1] or prices[i - 1] > fu[i - 1] else fu[i - 1]
-            fl[i] = lb[i] if lb[i] > fl[i - 1] or prices[i - 1] < fl[i - 1] else fl[i - 1]
-            direction[i] = direction[i - 1]
-            if direction[i - 1] == -1 and prices[i] > fu[i]: direction[i] = 1
-            elif direction[i - 1] == 1 and prices[i] < fl[i]: direction[i] = -1
-        line[i] = fl[i] if direction[i] == 1 else fu[i]
-        
-    d['STDirection'], d['Supertrend'] = direction, line
-
-    # 规则评分系统
-    d['TrendScore'] = ((c > d.MA50).astype(int)*10 + (d.MA50 > d.MA200).astype(int)*10 + (d.MA50 > d.MA50.shift(10)).astype(int)*10)
-    d['StrengthScore'] = np.select([d.Relative63 > .10, d.Relative63 > .03, d.Relative63 > 0], [20, 15, 10], default=0)
-    d['MomentumScore'] = d.RSI.between(45, 65).astype(int)*10 + (d.Hist > 0).astype(int)*5 + (d.STDirection == 1).astype(int)*5
-    d['LiquidityScore'] = np.select([d.DollarVolume >= 50e6, d.DollarVolume >= 10e6], [10, 5], default=0)
-    d['VolatilityScore'] = np.select([d.ATRpct.between(1, 4), d.ATRpct.between(.3, 6)], [10, 5], default=0)
-    d['MarketScore'] = d.MarketOK.astype(int)*10
-    d['Score'] = d[[x for x in d if x.endswith('Score')]].sum(axis=1).astype(int)
-    
-    return d
-
-def generate_plan(row: pd.Series, cfg: Config = Config()):
-    required = ['Close', 'ATR', 'MA200', 'Support', 'EMA20', 'RSI']
-    if any(not np.isfinite(row.get(k, np.nan)) for k in required) or row.ATR <= 0:
-        return None
-    entry = min(float(row.Close), float(row.EMA20))
-    stop = min(entry - 1.5 * row.ATR, row.Support - 0.25 * row.ATR)
-    risk = entry - stop
-    target = entry + cfg.rr * risk
-    reasons = []
-    if row.Close < cfg.min_price: reasons.append('股价低于门槛')
-    if row.DollarVolume < cfg.min_dollar_volume: reasons.append('成交额不足')
-    if row.ATRpct > cfg.max_atr_pct: reasons.append('波动率过高')
-    if not row.MarketOK: reasons.append('大盘弱于200日均线')
-    if not (row.Close > row.MA50 > row.MA200): reasons.append('趋势未确认')
-    if row.Score < cfg.min_score: reasons.append('综合评分不足')
-    if row.RSI > 75: reasons.append('RSI过热')
-    if risk > 4 * row.ATR: reasons.append('止损空间过大')
-    if stop <= 0: reasons.append('止损价无效')
-    
-    return dict(entry=entry, stop=stop, target=target, risk=risk,
-                eligible=not reasons, reasons=reasons, score=int(row.Score))
-
-# ----------------------------------------------------------------------------
-# 3. Streamlit 经典界面UI搭建
-# ----------------------------------------------------------------------------
-st.set_page_config(page_title='QuantumSignal PRO', page_icon='⚡', layout='wide')
-
-st.title('⚡ QuantumSignal PRO 终端')
-st.caption('融合高阶 Wilder/Supertrend 算法模型与经典极简分析界面')
-
-# Sidebar 参数设置
-st.sidebar.header('⚙️ 策略与风控参数')
-rr_val = st.sidebar.slider('目标盈亏比 (RR)', 1.0, 5.0, 2.0, 0.5)
-risk_pct_val = st.sidebar.slider('单笔风险预算 (%)', 0.1, 5.0, 0.5, 0.1)
-min_score_val = st.sidebar.slider('最低入选评分', 40, 90, 65, 5)
-min_vol_val = st.sidebar.number_input('最低20日均成交额(M$)', value=10.0) * 1e6
-
-cfg = Config(rr=rr_val, risk_pct=risk_pct_val, min_score=min_score_val, min_dollar_volume=min_vol_val)
-
-# 主页面输入
-col_input, col_btn = st.columns([3, 1])
-with col_input:
-    symbol = st.text_input('股票代码 (如: NVDA, AAPL, TSLA)', value='NVDA').upper().strip()
-with col_btn:
-    st.write(' ')
-    st.write(' ')
-    run_btn = st.button('分析标的', type='primary')
-
-@st.cache_data(ttl=3600*4)
-def load_data(sym: str):
-    df = yf.download(sym, period='2y', progress=False)
-    if isinstance(df.columns, pd.MultiIndex):
-        df = df.xs(sym, axis=1, level=1) if sym in df.columns.get_level_values(1) else df.droplevel(1, axis=1)
-    return df
-
-@st.cache_data(ttl=3600*4)
-def load_spy():
-    spy = yf.download('SPY', period='2y', progress=False)
-    if isinstance(spy.columns, pd.MultiIndex):
-        spy = spy.droplevel(1, axis=1)
-    return spy
-
-if symbol:
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_spy_benchmark(period="2y"):
     try:
-        raw_df = load_data(symbol)
-        spy_df = load_spy()
-        
-        if raw_df.empty:
-            st.error(f"无法获取代码 {symbol} 的行情数据。")
-        else:
-            df = calculate_indicators(raw_df, spy_df)
-            latest = df.iloc[-1]
-            p = generate_plan(latest, cfg)
-            
-            # 顶部 Metrics 卡片
-            c1, c2, c3, c4, c5 = st.columns(5)
-            c1.metric("最新收盘价", f"${latest.Close:.2f}")
-            c2.metric("综合评分", f"{latest.Score} / 100")
-            c3.metric("买入参考价", f"${p['entry']:.2f}" if p else "-")
-            c4.metric("止损价", f"${p['stop']:.2f}" if p else "-")
-            c5.metric("目标价", f"${p['target']:.2f}" if p else "-")
-            
-            if p:
-                if p['eligible']:
-                    st.success("✅ 满足全部筛选条件，建议列入回踩观察区。")
-                else:
-                    st.warning(f"⚠️ 未通过筛选因素：{'；'.join(p['reasons'])}")
-            
-            # Plotly 三阶融合图表
-            fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.6, 0.2, 0.2])
-            
-            # K线与均线
-            fig.add_trace(go.Candlestick(x=df.index, open=df.Open, high=df.High, low=df.Low, close=df.Close, name='K线'), row=1, col=1)
-            fig.add_trace(go.Scatter(x=df.index, y=df.EMA20, name='EMA20', line=dict(color='#42caff', width=1.5)), row=1, col=1)
-            fig.add_trace(go.Scatter(x=df.index, y=df.MA50, name='MA50', line=dict(color='#e7c56b', width=1.5)), row=1, col=1)
-            fig.add_trace(go.Scatter(x=df.index, y=df.Supertrend, name='Supertrend', line=dict(color='#a996ef', width=1.5)), row=1, col=1)
-            
-            if p:
-                fig.add_hline(y=p['entry'], line_dash='dash', line_color='#e7c56b', annotation_text='买入参考', row=1, col=1)
-                fig.add_hline(y=p['stop'], line_dash='dash', line_color='#ff6f91', annotation_text='止损', row=1, col=1)
-                fig.add_hline(y=p['target'], line_dash='dash', line_color='#45ddbc', annotation_text='目标', row=1, col=1)
+        spy = yf.Ticker("SPY").history(period=period)
+        return clean_df(spy)
+    except Exception:
+        return None
 
-            # MACD
-            colors = ['#45ddbc' if val >= 0 else '#ff6f91' for val in df.Hist]
-            fig.add_trace(go.Bar(x=df.index, y=df.Hist, name='MACD柱', marker_color=colors), row=2, col=1)
-            
-            # RSI
-            fig.add_trace(go.Scatter(x=df.index, y=df.RSI, name='RSI', line=dict(color='#a996ef')), row=3, col=1)
-            fig.add_hline(y=70, line_dash='dot', line_color='red', row=3, col=1)
-            fig.add_hline(y=30, line_dash='dot', line_color='green', row=3, col=1)
-            
-            fig.update_layout(template='plotly_dark', height=650, margin=dict(l=10, r=10, t=20, b=10), showlegend=True)
-            fig.update_xaxes(rangeslider_visible=False)
-            
-            st.plotly_chart(fig, use_container_state_dict=True, use_container_width=True)
-            
-    except Exception as e:
-        st.error(f"处理数据时出错: {str(e)}")
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_advanced_quant_signals(symbol: str, risk_reward_ratio: float = 2.0, period: str = "2y"):
+    if not symbol or not symbol.strip():
+        return None
+    try:
+        ticker = yf.Ticker(symbol.strip().upper())
+        df = ticker.history(period=period)
+        if df.empty or len(df) < 210:  # Pro 版需要至少 210 日预热以精准计算 MA200 & Relative63
+            return None
+        
+        df = clean_df(df)
+        c, h, l, v = df.Close, df.High, df.Low, df.Volume
+        
+        # 1. 准确的 Wilder ATR
+        tr = pd.concat([h-l, (h-c.shift()).abs(), (l-c.shift()).abs()], axis=1).max(axis=1)
+        df['ATR'] = wilder_smooth(tr, 14)
+        
+        # 2. 均线与 EMA
+        for n in (20, 50, 200):
+            df[f'MA{n}'] = c.rolling(n).mean()
+        df['EMA10'] = c.ewm(span=10, adjust=False).mean()
+        df['EMA20'] = c.ewm(span=20, adjust=False).mean()
+        
+        # 3. Wilder RSI
+        delta = c.diff()
+        gain, loss = wilder_smooth(delta.clip(lower=0)), wilder_smooth(-delta.clip(upper=0))
+        df['RSI'] = 100 - 100/(1 + gain/loss.replace(0, np.nan))
+        df.loc[(loss == 0) & (gain > 0), 'RSI'] = 100
+        df.loc[(gain == 0) & (loss > 0), 'RSI'] = 0
+        df.loc[(gain == 0) & (loss == 0), 'RSI'] = 50
+        
+        # 4. MACD 及其精准状态
+        df['MACD'] = c.ewm(span=12, adjust=False).mean() - c.ewm(span=26, adjust=False).mean()
+        df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+        df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
+        
+        # 5. Bollinger Bands & VWMA20 (代替非严格的日内VWAP，提升全日线准确度)
+        df['VWMA20'] = (((h+l+c)/3)*v).rolling(20).sum() / v.rolling(20).sum().replace(0, np.nan)
+        df['STD20'] = c.rolling(20).std()
+        df['Upper_Band'] = df['MA20'] + (2 * df['STD20'])
+        df['Lower_Band'] = df['MA20'] - (2 * df['STD20'])
+        
+        # 6. Pro 级 Supertrend 算法 (状态持续性)
+        at10 = wilder_smooth(tr, 10).to_numpy()
+        ub = ((h+l)/2).to_numpy() + 3*at10
+        lb = ((h+l)/2).to_numpy() - 3*at10
+        fu, fl = ub.copy(), lb.copy()
+        direction = np.zeros(len(df), dtype=int)
+        line = np.full(len(df), np.nan)
+        prices = c.to_numpy()
+        for i in range(len(df)):
+            if not np.isfinite(at10[i]): continue
+            if i == 0 or not np.isfinite(at10[i-1]):
+                direction[i] = 1 if prices[i] >= (h.iloc[i]+l.iloc[i])/2 else -1
+            else:
+                fu[i] = ub[i] if ub[i] < fu[i-1] or prices[i-1] > fu[i-1] else fu[i-1]
+                fl[i] = lb[i] if lb[i] > fl[i-1] or prices[i-1] < fl[i-1] else fl[i-1]
+                direction[i] = direction[i-1]
+                if direction[i-1] == -1 and prices[i] > fu[i]: direction[i] = 1
+                elif direction[i-1] == 1 and prices[i] < fl[i]: direction[i] = -1
+            line[i] = fl[i] if direction[i] == 1 else fu[i]
+        df['STDirection'], df['Supertrend'] = direction, line
+
+        # 7. 相对 SPY 的 Alpha 大盘相对强度评分
+        spy_df = fetch_spy_benchmark(period=period)
+        df['Return63'] = c.pct_change(63, fill_method=None)
+        if spy_df is not None and not spy_df.empty:
+            b = spy_df.Close.reindex(df.index)
+            df['Relative63'] = df['Return63'] - b.pct_change(63, fill_method=None)
+            df['MarketOK'] = b > b.rolling(200).mean()
+        else:
+            df['Relative63'] = np.nan
+            df['MarketOK'] = False
+
+        df['DollarVolume'] = (c * v).rolling(20).mean()
+        df['ATRpct'] = df['ATR'] / c * 100
+
+        # 8. Pro 版全维度打分引擎 (按 100 分制归一化)
+        r_last = df.iloc[-1]
+        trend_score = ((r_last.Close > r_last.MA50)*10 + (r_last.MA50 > r_last.MA200)*10 + (r_last.MA50 > df.MA50.iloc[-10])*10)
+        rel_val = r_last.Relative63 if np.isfinite(r_last.Relative63) else -1
+        strength_score = 20 if rel_val > 0.10 else (15 if rel_val > 0.03 else (10 if rel_val > 0 else 0))
+        rsi_val = r_last.RSI
+        momentum_score = (10 if 45 <= rsi_val <= 65 else 0) + (5 if r_last.MACD_Hist > 0 else 0) + (5 if r_last.STDirection == 1 else 0)
+        dvol = r_last.DollarVolume
+        liquidity_score = 10 if dvol >= 50e6 else (5 if dvol >= 10e6 else 0)
+        atr_p = r_last.ATRpct
+        volatility_score = 10 if 1 <= atr_p <= 4 else (5 if 0.3 <= atr_p <= 6 else 0)
+        market_score = 10 if r_last.MarketOK else 0
+        
+        quant_score = int(trend_score + strength_score + momentum_score + liquidity_score + volatility_score + market_score)
+
+        # 9. 买止损盈风控测算 (结合结构支撑与 Wilder ATR)
+        current_price = float(r_last.Close)
+        prev_close = float(df.Close.iloc[-2])
+        change_pct = ((current_price - prev_close) / prev_close) * 100
+        
+        near_market_buy = min(current_price, float(r_last.EMA20))
+        support = float(df.Low.rolling(20).min().iloc[-1])
+        stop_loss = min(near_market_buy - 1.5 * float(r_last.ATR), support - 0.25 * float(r_last.ATR))
+        stop_loss = max(stop_loss, 0.01)
+        risk = near_market_buy - stop_loss
+        take_profit = near_market_buy + (risk * risk_reward_ratio)
+        ideal_buy_price = near_market_buy - (0.25 * float(r_last.ATR))
+
+        if quant_score >= 80: recommendation = "🔥 极力推荐 (High Alpha)"
+        elif quant_score >= 65: recommendation = "👀 重点关注 (Watch Opportunity)"
+        else: recommendation = "❄️ 观望/防守 (Avoid)"
+
+        # 兼容形态描述
+        is_macd_bullish = r_last.MACD_Hist > 0
+        macd_status = "🟢 金叉 (Bullish)" if r_last.MACD > r_last.MACD_Signal else "🔴 死叉 (Bearish)"
+        supertrend_signal = "🟢 多头轨道 (BUY)" if r_last.STDirection == 1 else "🔴 空头轨道 (SELL)"
+
+        if current_price > r_last.MA20 and r_last.MA20 > r_last.MA50:
+            trend_label = "🔥 强力多头 (Strong Uptrend)"
+        elif current_price < r_last.MA20 and r_last.MA20 < r_last.MA50:
+            trend_label = "❄️ 降维空头 (Downtrend Risk)"
+        else:
+            trend_label = "⚡ 宽幅震荡 (Sideways)"
+
+        return {
+            "df": df, "symbol": symbol.upper().strip(),
+            "name": symbol.upper(),
+            "current_price": round(current_price, 2),
+            "change_pct": round(change_pct, 2),
+            "near_market_buy": round(near_market_buy, 2),
+            "ideal_buy_price": round(ideal_buy_price, 2),
+            "stop_loss": round(stop_loss, 2),
+            "take_profit": round(take_profit, 2),
+            "atr": round(float(r_last.ATR), 2),
+            "rsi": round(float(rsi_val), 1),
+            "ema10": round(float(r_last.EMA10), 2),
+            "lower_band": round(float(r_last.Lower_Band), 2),
+            "upper_band": round(float(r_last.Upper_Band), 2),
+            "vwap": round(float(r_last.VWMA20), 2),
+            "macd_status": macd_status,
+            "supertrend_signal": supertrend_signal,
+            "trend_label": trend_label,
+            "quant_score": quant_score,
+            "recommendation": recommendation
+        }
+    except Exception:
+        return None
+
+# -----------------------------------------------------------------------------
+# 5. Pro 级高级历史回测引擎 (跳空、同日双触发止损优先、严密费用滑点模拟)
+# -----------------------------------------------------------------------------
+@st.cache_data(ttl=1800, show_spinner=False)
+def run_backtest_engine(symbol: str, initial_capital: float = 10000.0, risk_reward_ratio: float = 2.0, period: str = "2y"):
+    sig_data = fetch_advanced_quant_signals(symbol, risk_reward_ratio=risk_reward_ratio, period=period)
+    if not sig_data:
+        return None, None
+        
+    df = sig_data['df']
+    if len(df) < 212:
+        return None, None
+
+    fee, slip = 0.0005, 0.0005  # 5 bps
+    capital = float(initial_capital)
+    pos = 0.0
+    entry_price = 0.0
+    stop_loss = 0.0
+    target_price = 0.0
+    basis = 0.0
+    
+    trades = []
+    equity_curve = []
+    
+    start_i = 210
+    equity_curve.append({'Date': df.index[start_i-1], 'Capital': capital})
+
+    for i in range(start_i, len(df)):
+        r, prev = df.iloc[i], df.iloc[i-1]
+        date = df.index[i]
+        exited = False
+        entered_intraday = False
+        
+        # 1. 持仓退出规则逻辑 (跳空、止损、止盈)
+        if pos > 0:
+            if r.Open <= stop_loss:
+                sell_price = float(r.Open) * (1 - slip)
+                proceeds = pos * sell_price * (1 - fee)
+                capital += proceeds
+                trades.append({"date": date, "type": "SELL (跳空止损)", "price": round(sell_price, 2), "profit": round(proceeds - basis, 2), "capital": round(capital, 2)})
+                pos = 0.0
+                exited = True
+            elif prev.Close < prev.MA50:
+                sell_price = float(r.Open) * (1 - slip)
+                proceeds = pos * sell_price * (1 - fee)
+                capital += proceeds
+                trades.append({"date": date, "type": "SELL (趋势破坏)", "price": round(sell_price, 2), "profit": round(proceeds - basis, 2), "capital": round(capital, 2)})
+                pos = 0.0
+                exited = True
+            elif r.Open >= target_price:
+                sell_price = float(target_price)
+                proceeds = pos * sell_price * (1 - fee)
+                capital += proceeds
+                trades.append({"date": date, "type": "SELL (开盘跳空止盈)", "price": round(sell_price, 2), "profit": round(proceeds - basis, 2), "capital": round(capital, 2)})
+                pos = 0.0
+                exited = True
+
+        # 2. 空仓买入触发 (前一日信号，次日限价挂单)
+        if pos == 0 and not exited:
+            # 严格按照 Pro 条件筛选
+            if prev.Close > prev.MA50 > prev.MA200 and prev.Score >= 60 and r.Low <= min(prev.Close, prev.EMA20):
+                if r.Open > (min(prev.Close, prev.EMA20) - 1.5 * prev.ATR):
+                    fill = min(float(r.Open), min(float(prev.Close), float(prev.EMA20)))
+                    proposed_stop = max(fill - 1.5 * float(prev.ATR), 0.01)
+                    per_share_risk = fill - proposed_stop * (1 - slip) + fee * (fill + proposed_stop)
+                    
+                    if per_share_risk > 0:
+                        max_shares = max(0, int(capital * 0.20 / (fill * (1 + fee)))) # 单只持仓 20%
+                        risk_shares = max(0, int(capital * 0.005 / per_share_risk))  # 风险预算 0.5%
+                        q = min(max_shares, risk_shares)
+                        
+                        if q > 0:
+                            pos = float(q)
+                            entry_price = fill
+                            stop_loss = proposed_stop
+                            target_price = entry_price + risk_reward_ratio * (entry_price - stop_loss)
+                            basis = pos * entry_price * (1 + fee)
+                            capital -= basis
+                            entered_intraday = r.Open > min(prev.Close, prev.EMA20)
+                            trades.append({"date": date, "type": "BUY", "price": round(entry_price, 2), "profit": 0.0, "capital": round(pos * entry_price, 2)})
+
+        # 3. 盘中双触发检测 (止损优先)
+        if pos > 0:
+            if r.Low <= stop_loss:
+                sell_price = float(stop_loss) * (1 - slip)
+                proceeds = pos * sell_price * (1 - fee)
+                capital += proceeds
+                trades.append({"date": date, "type": "SELL (止损离场)", "price": round(sell_price, 2), "profit": round(proceeds - basis, 2), "capital": round(capital, 2)})
+                pos = 0.0
+            elif not entered_intraday and r.High >= target_price:
+                sell_price = float(target_price)
+                proceeds = pos * sell_price * (1 - fee)
+                capital += proceeds
+                trades.append({"date": date, "type": "SELL (目标止盈)", "price": round(sell_price, 2), "profit": round(proceeds - basis, 2), "capital": round(capital, 2)})
+                pos = 0.0
+                
+            if pos > 0:
+                # 移动止损于下一交易日生效
+                stop_loss = max(stop_loss, float(r.High - 2 * r.ATR))
+
+        current_total = capital + (pos * float(r.Close))
+        equity_curve.append({"Date": date, "Capital": current_total})
+
+    equity_df = pd.DataFrame(equity_curve)
+    if not equity_df.empty:
+        total_return = ((equity_df['Capital'].iloc[-1] - initial_capital) / initial_capital) * 100
+        equity_df['Max_Capital'] = equity_df['Capital'].cummax()
+        equity_df['Drawdown'] = (equity_df['Capital'] - equity_df['Max_Capital']) / equity_df['Max_Capital']
+        max_drawdown = equity_df['Drawdown'].min() * 100
+        
+        sell_trades = [t for t in trades if "SELL" in t['type']]
+        win_trades = [t for t in sell_trades if t['profit'] > 0]
+        win_rate = (len(win_trades) / len(sell_trades) * 100) if sell_trades else 0.0
+        
+        metrics = {
+            "initial_capital": initial_capital,
+            "final_capital": round(equity_df['Capital'].iloc[-1], 2),
+            "total_return": round(total_return, 2),
+            "max_drawdown": round(max_drawdown, 2),
+            "win_rate": round(win_rate, 1),
+            "total_trades": len(sell_trades)
+        }
+        return metrics, equity_df
+    return None, None
+
+# -----------------------------------------------------------------------------
+# 6. Quantum One 专业 Plotly 画图引擎 (全图样式完全保持不变)
+# -----------------------------------------------------------------------------
+def render_professional_chart(sig_data):
+    df = sig_data['df'].tail(60)
+    
+    fig = make_subplots(
+        rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.04,
+        row_heights=[0.6, 0.2, 0.2],
+        subplot_titles=(
+            f"📈 {sig_data['symbol']} 主图", 
+            "📊 MACD 动能量能", 
+            "⚡ RSI 相对强弱"
+        )
+    )
+
+    fig.add_trace(go.Candlestick(
+        x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
+        name="K线", increasing_line_color='#00ff66', decreasing_line_color='#ff3366'
+    ), row=1, col=1)
+
+    fig.add_trace(go.Scatter(x=df.index, y=df['VWMA20'], line=dict(color='#ff00ea', width=1.2, dash='dot'), name="VWMA20"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['EMA10'], line=dict(color='#00f0ff', width=1.2), name="EMA10"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['Supertrend'], line=dict(color='#a996ef', width=1.2), name="Supertrend"), row=1, col=1)
+
+    fig.add_hline(y=sig_data['near_market_buy'], line_dash="dash", line_color="#ccff00", annotation_text="⚡ 买点", row=1, col=1)
+    fig.add_hline(y=sig_data['ideal_buy_price'], line_dash="dash", line_color="#00ff66", annotation_text="🎯 理想买", row=1, col=1)
+    fig.add_hline(y=sig_data['stop_loss'], line_dash="dash", line_color="#ff3366", annotation_text="🛡️ 止损", row=1, col=1)
+
+    colors = np.where(df['MACD_Hist'] >= 0, '#00ff66', '#ff3366')
+    fig.add_trace(go.Bar(x=df.index, y=df['MACD_Hist'], marker_color=colors, name="MACD Hist"), row=2, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['MACD'], line=dict(color='#00f0ff', width=1), name="DIF"), row=2, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['MACD_Signal'], line=dict(color='#ffaa00', width=1), name="DEA"), row=2, col=1)
+
+    fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='#ab47bc', width=1.5), name="RSI"), row=3, col=1)
+    fig.add_hline(y=70, line_dash="dot", line_color="#ff3366", opacity=0.7, row=3, col=1)
+    fig.add_hline(y=30, line_dash="dot", line_color="#00ff66", opacity=0.7, row=3, col=1)
+
+    fig.update_layout(
+        template="plotly_dark", paper_bgcolor='#0b0e14', plot_bgcolor='#161b22',
+        margin=dict(l=10, r=10, t=25, b=10), height=550, showlegend=False,
+        xaxis3_rangeslider_visible=False
+    )
+    fig.update_xaxes(showgrid=True, gridcolor='#21262d')
+    fig.update_yaxes(showgrid=True, gridcolor='#21262d')
+    return fig
+
+# -----------------------------------------------------------------------------
+# 7. UI 主体逻辑与无缝页面路由 (经典 4 模块切换)
+# -----------------------------------------------------------------------------
+st.markdown('<h3 class="tech-header">⚡ QUANTUM TERMINAL PRO</h3>', unsafe_allow_html=True)
+
+def on_nav_change():
+    st.session_state['current_page'] = st.session_state['nav_radio_choice']
+
+with st.sidebar:
+    st.markdown("### 🎛️ 终端控制台")
+    current_idx = NAV_OPTIONS.index(st.session_state['current_page']) if st.session_state['current_page'] in NAV_OPTIONS else 0
+    
+    st.radio(
+        "导航菜单",
+        NAV_OPTIONS,
+        index=current_idx,
+        key="nav_radio_choice",
+        on_change=on_nav_change,
+        label_visibility="collapsed"
+    )
+
+    st.markdown("---")
+    with st.form(key="global_setting_form"):
+        st.markdown("#### ⚙️ 策略风控")
+        new_rr = st.slider("目标盈亏比", 1.0, 4.0, float(st.session_state['rr_ratio']), 0.5)
+        form_submitted = st.form_submit_button("保存配置", use_container_width=True)
+        if form_submitted:
+            st.session_state['rr_ratio'] = new_rr
+            st.rerun()
+
+app_mode = st.session_state['current_page']
+rr_ratio = st.session_state['rr_ratio']
+
+# --- 模式 1: 自动化全市场扫描推荐 ---
+if app_mode == "🚀 自动扫描 & 智能推荐":
+    st.markdown("### 🛰️ 量化自动扫描与推荐")
+
+    c_preset, c_custom, c_btn = st.columns([2.5, 3.5, 1.5])
+    
+    with c_preset:
+        selected_preset = st.selectbox("📦 选择扫描预设池", list(INDEX_PRESET_POOLS.keys()))
+
+    if INDEX_PRESET_POOLS[selected_preset] == "SP500_AUTO":
+        default_pool_list = fetch_sp500_tickers()
+    else:
+        default_pool_list = INDEX_PRESET_POOLS[selected_preset]
+
+    with c_custom:
+        custom_pool_str = st.text_input("待扫描代码 (逗号分隔)", value=", ".join(default_pool_list))
+
+    with c_btn:
+        st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+        run_scan = st.button("⚡ 启动扫描", use_container_width=True)
+
+    symbols_to_scan = [s.strip().upper() for s in custom_pool_str.split(",") if s.strip()]
+
+    if run_scan or 'scan_results' in st.session_state:
+        if run_scan:
+            progress_bar = st.progress(0)
+            scan_data = []
+            total_symbols = len(symbols_to_scan)
+            for idx, sym in enumerate(symbols_to_scan):
+                sig = fetch_advanced_quant_signals(sym, risk_reward_ratio=rr_ratio)
+                if sig:
+                    scan_data.append(sig)
+                progress_bar.progress((idx + 1) / total_symbols)
+            progress_bar.empty()
+            scan_data.sort(key=lambda x: x['quant_score'], reverse=True)
+            st.session_state.scan_results = scan_data
+
+        results = st.session_state.get('scan_results', [])
+
+        if results:
+            st.markdown("#### 🔥 得分 Top 3 推荐标的")
+            top_cols = st.columns(min(3, len(results)))
+            for i, col in enumerate(top_cols):
+                res = results[i]
+                with col:
+                    st.markdown(f"""
+                    <div class="tech-card">
+                        <div style="font-size:10px; color:#00f0ff; font-weight:700;">TOP {i+1}</div>
+                        <div style="font-size:18px; font-weight:700; color:#ffffff;">{res['symbol']}</div>
+                        <div style="font-size:16px; font-weight:700; color:#ccff00; margin-top:4px;">得分: {res['quant_score']}</div>
+                        <div style="font-size:11px; color:#00ff66;">{res['recommendation']}</div>
+                        <hr style="border-color:#30363d; margin:6px 0;">
+                        <div style="font-size:11px; color:#8b949e;">现价: <b>${res['current_price']}</b></div>
+                        <div style="font-size:11px; color:#ccff00;">⚡ 贴合买点: <b>${res['near_market_buy']}</b></div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    if st.button(f"🔍 诊断 {res['symbol']}", key=f"btn_top_{res['symbol']}"):
+                        st.session_state['selected_ticker'] = res['symbol']
+                        st.session_state['current_page'] = "🔍 单标的全量诊断"
+                        st.rerun()
+
+            st.markdown("---")
+            st.markdown("#### 📊 全量矩阵总表")
+            table_rows = []
+            for r in results:
+                table_rows.append({
+                    "代码": r['symbol'],
+                    "综合得分": r['quant_score'],
+                    "推荐评级": r['recommendation'],
+                    "现价 ($)": r['current_price'],
+                    "⚡ 贴合买点 ($)": r['near_market_buy'],
+                    "🎯 理想买点 ($)": r['ideal_buy_price'],
+                    "🛡️ 止损位 ($)": r['stop_loss'],
+                    "🎉 止盈位 ($)": r['take_profit'],
+                    "RSI": r['rsi']
+                })
+            st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
+
+# --- 模式 2: 单标的精细化诊断 ---
+elif app_mode == "🔍 单标的全量诊断":
+    st.markdown("### 🔍 标的量化诊断")
+    
+    with st.form(key="symbol_search_form"):
+        c_in, c_b = st.columns([3, 1])
+        with c_in:
+            target_symbol = st.text_input("股票代码", value=st.session_state.get('selected_ticker', 'NVDA')).upper().strip()
+        with c_b:
+            st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+            search_submitted = st.form_submit_button("⚡ 诊断", use_container_width=True)
+            if search_submitted:
+                st.session_state['selected_ticker'] = target_symbol
+
+    target_symbol = st.session_state.get('selected_ticker', 'NVDA')
+    if target_symbol:
+        sig = fetch_advanced_quant_signals(target_symbol, risk_reward_ratio=rr_ratio)
+        if sig:
+            st.markdown(f"**{sig['symbol']}** ({sig['name']}) | 得分: `{sig['quant_score']}分` (`{sig['recommendation']}`)")
+
+            k1, k2, k3, k4 = st.columns(4)
+            with k1:
+                color_str = "#00ff66" if sig['change_pct'] >= 0 else "#ff3366"
+                st.markdown(f"""
+                <div class="tech-card">
+                    <div class="metric-title">当前价格</div>
+                    <div style="font-size:16px; font-weight:700; color:{color_str};">${sig['current_price']}</div>
+                </div>""", unsafe_allow_html=True)
+
+            with k2:
+                st.markdown(f"""
+                <div class="tech-card">
+                    <div class="metric-title">⚡ 贴合现价买点</div>
+                    <div class="metric-value-nearbuy">${sig['near_market_buy']}</div>
+                </div>""", unsafe_allow_html=True)
+
+            with k3:
+                st.markdown(f"""
+                <div class="tech-card">
+                    <div class="metric-title">🛡️ 动态止损线</div>
+                    <div class="metric-value-stop">${sig['stop_loss']}</div>
+                </div>""", unsafe_allow_html=True)
+
+            with k4:
+                st.markdown(f"""
+                <div class="tech-card">
+                    <div class="metric-title">🎉 目标止盈线</div>
+                    <div class="metric-value-take">${sig['take_profit']}</div>
+                </div>""", unsafe_allow_html=True)
+
+            st.plotly_chart(render_professional_chart(sig), use_container_width=True, config={'displayModeBar': False})
+
+            st.markdown("#### 🤖 量化指标状态")
+            st.write(f"- **趋势**: `{sig['trend_label']}` | **RSI**: `{sig['rsi']}` | **MACD**: `{sig['macd_status']}` | **Supertrend**: `{sig['supertrend_signal']}`")
+
+            if st.button(f"➕ 加入自选清单", use_container_width=True):
+                add_to_watchlist(sig['symbol'], sig['name'], "推荐自选")
+                st.success("已成功保存！")
+
+# --- 模式 3: 策略历史回测引擎 UI ---
+elif app_mode == "🧪 策略历史回测引擎":
+    st.markdown("### 🧪 策略历史回测 (Backtest Engine)")
+
+    with st.form(key="backtest_form"):
+        c_bt_sym, c_bt_cap, c_bt_btn = st.columns([2, 2, 1.5])
+        with c_bt_sym:
+            bt_symbol = st.text_input("回测代码", value=st.session_state.get('selected_ticker', 'NVDA')).upper().strip()
+        with c_bt_cap:
+            init_capital = st.number_input("初始资金 ($)", value=10000, step=1000)
+        with c_bt_btn:
+            st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+            run_bt = st.form_submit_button("🚀 回测", use_container_width=True)
+
+    if run_bt or 'bt_metrics' in st.session_state:
+        if run_bt:
+            metrics, equity_df = run_backtest_engine(bt_symbol, initial_capital=float(init_capital), risk_reward_ratio=rr_ratio)
+            st.session_state['bt_metrics'] = metrics
+            st.session_state['bt_equity'] = equity_df
+
+        metrics = st.session_state.get('bt_metrics')
+        equity_df = st.session_state.get('bt_equity')
+
+        if metrics and equity_df is not None:
+            m1, m2, m3, m4 = st.columns(4)
+            with m1:
+                st.markdown(f"""
+                <div class="tech-card">
+                    <div class="metric-title">累计总收益率</div>
+                    <div style="font-size:16px; font-weight:700; color:#00ff66;">{metrics['total_return']}%</div>
+                </div>""", unsafe_allow_html=True)
+            with m2:
+                st.markdown(f"""
+                <div class="tech-card">
+                    <div class="metric-title">策略胜率</div>
+                    <div style="font-size:16px; font-weight:700; color:#00f0ff;">{metrics['win_rate']}%</div>
+                </div>""", unsafe_allow_html=True)
+            with m3:
+                st.markdown(f"""
+                <div class="tech-card">
+                    <div class="metric-title">历史最大回撤</div>
+                    <div style="font-size:16px; font-weight:700; color:#ff3366;">{metrics['max_drawdown']}%</div>
+                </div>""", unsafe_allow_html=True)
+            with m4:
+                st.markdown(f"""
+                <div class="tech-card">
+                    <div class="metric-title">最终资产</div>
+                    <div style="font-size:16px; font-weight:700; color:#ccff00;">${metrics['final_capital']:,.2f}</div>
+                </div>""", unsafe_allow_html=True)
+
+            fig_equity = go.Figure()
+            fig_equity.add_trace(go.Scatter(x=equity_df['Date'], y=equity_df['Capital'], mode='lines', line=dict(color='#00f0ff', width=2)))
+            fig_equity.update_layout(
+                title=f"📈 {bt_symbol} 资产净值曲线",
+                template="plotly_dark", paper_bgcolor='#0b0e14', plot_bgcolor='#161b22',
+                height=350, margin=dict(l=10, r=10, t=35, b=10)
+            )
+            st.plotly_chart(fig_equity, use_container_width=True, config={'displayModeBar': False})
+
+# --- 模式 4: 持仓自选清单监控 ---
+elif app_mode == "📊 自选清单监控":
+    st.markdown("### 📋 自选清单")
+    df_w = get_watchlist()
+    if df_w.empty:
+        st.info("清单为空。")
+    else:
+        res = []
+        for _, r in df_w.iterrows():
+            s = fetch_advanced_quant_signals(r['symbol'], risk_reward_ratio=rr_ratio)
+            if s:
+                res.append({
+                    "代码": s['symbol'],
+                    "得分": s['quant_score'],
+                    "评级": s['recommendation'],
+                    "现价 ($)": s['current_price'],
+                    "⚡ 贴合买点 ($)": s['near_market_buy'],
+                    "🛡️ 止损 ($)": s['stop_loss'],
+                    "🎉 止盈 ($)": s['take_profit']
+                })
+        if res:
+            st.dataframe(pd.DataFrame(res), use_container_width=True, hide_index=True)
