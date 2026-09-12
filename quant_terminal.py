@@ -254,10 +254,8 @@ def fetch_advanced_quant_signals(symbol: str, risk_reward_ratio: float = 2.0, pe
             trend_code = "SIDEWAYS"
 
         # --- C. 双层买点算价逻辑 ---
-        # 1. 理想回调买点 (抄底逻辑)
         ideal_buy_price = min(lower_band, ma50)
 
-        # 2. 贴合现价买点 (右侧顺势逻辑)
         if trend_code == "UPTREND":
             near_market_buy = min(current_price, max(ema10, vwap, current_price * 0.992))
         elif trend_code == "SIDEWAYS":
@@ -265,13 +263,12 @@ def fetch_advanced_quant_signals(symbol: str, risk_reward_ratio: float = 2.0, pe
         else:
             near_market_buy = min(current_price, current_price - (0.5 * atr))
 
-        # 动态止损与风控止盈算价
         stop_loss = near_market_buy - (2 * atr)
         take_profit = near_market_buy + (2 * atr * risk_reward_ratio)
 
         # --- D. 新闻情绪解析与提取 ---
         news_list = []
-        news_sentiment_score = 0  # 情绪加权初始分
+        news_sentiment_score = 0
         try:
             raw_news = ticker.news
             if raw_news:
@@ -283,7 +280,6 @@ def fetch_advanced_quant_signals(symbol: str, risk_reward_ratio: float = 2.0, pe
                         "link": item.get('link', '#'),
                         "providerPublishTime": datetime.fromtimestamp(item.get('providerPublishTime', 0)).strftime('%m-%d %H:%M') if item.get('providerPublishTime') else ''
                     })
-                    # 简单新闻关键词情绪扫描加分
                     title_upper = title.upper()
                     if any(w in title_upper for w in ['RECORD', 'SURGE', 'BEAT', 'GROWTH', 'RAISE', 'BULL']):
                         news_sentiment_score += 3
@@ -292,10 +288,8 @@ def fetch_advanced_quant_signals(symbol: str, risk_reward_ratio: float = 2.0, pe
         except:
             pass
 
-        # --- E. 多维度量化推选评分模型 (0 - 100分) ---
+        # --- E. 多维度量化推选评分模型 ---
         quant_score = 0
-        
-        # 1. 趋势因子 (30分)
         if trend_code == "UPTREND":
             quant_score += 30
         elif trend_code == "RECOVERY":
@@ -303,10 +297,9 @@ def fetch_advanced_quant_signals(symbol: str, risk_reward_ratio: float = 2.0, pe
         elif trend_code == "SIDEWAYS":
             quant_score += 10
 
-        # 2. 买点贴合性价比因子 (30分)
         price_gap_pct = abs(current_price - near_market_buy) / current_price * 100
         if price_gap_pct <= 1.0:
-            quant_score += 30  # 价格正好踩在支撑位，性价比极高
+            quant_score += 30
         elif price_gap_pct <= 2.5:
             quant_score += 20
         elif price_gap_pct <= 4.0:
@@ -314,20 +307,18 @@ def fetch_advanced_quant_signals(symbol: str, risk_reward_ratio: float = 2.0, pe
         else:
             quant_score += 5
 
-        # 3. 动能健康度因子 (20分)
         if 48 <= rsi <= 65:
-            quant_score += 20  # 健康主升浪区间
+            quant_score += 20
         elif 35 <= rsi < 48:
-            quant_score += 12  # 蓄势区间
+            quant_score += 12
         elif rsi > 70:
-            quant_score += 3   # 警惕严重超买
+            quant_score += 3
 
-        # 4. 指标共振与新闻情绪 (20分)
         if is_macd_bullish:
             quant_score += 5
         if supertrend_is_buy:
             quant_score += 5
-        quant_score += min(10, max(-5, news_sentiment_score)) # 动态注入新闻情绪分
+        quant_score += min(10, max(-5, news_sentiment_score))
 
         quant_score = int(min(100, max(0, quant_score)))
 
@@ -367,12 +358,115 @@ def fetch_advanced_quant_signals(symbol: str, risk_reward_ratio: float = 2.0, pe
         return None
 
 # -----------------------------------------------------------------------------
-# 4. 专业级三分栏画图引擎 (清爽独立、无拥挤撕裂感)
+# 4. 新增：内置轻量级历史回测引擎 (Backtest Engine)
+# -----------------------------------------------------------------------------
+def run_backtest_engine(symbol: str, initial_capital: float = 10000.0, risk_reward_ratio: float = 2.0, period: str = "2y"):
+    ticker = yf.Ticker(symbol.upper().strip())
+    df = ticker.history(period=period)
+    if df.empty or len(df) < 50:
+        return None, None
+
+    # 计算所需基础指标
+    df['MA20'] = df['Close'].rolling(window=20).mean()
+    df['MA50'] = df['Close'].rolling(window=50).mean()
+    df['EMA10'] = df['Close'].ewm(span=10, adjust=False).mean()
+    
+    df['High-Low'] = df['High'] - df['Low']
+    df['High-Close'] = np.abs(df['High'] - df['Close'].shift(1))
+    df['Low-Close'] = np.abs(df['Low'] - df['Close'].shift(1))
+    df['TR'] = df[['High-Low', 'High-Close', 'Low-Close']].max(axis=1)
+    df['ATR'] = df['TR'].rolling(window=14).mean()
+
+    # 回测变量初始化
+    capital = initial_capital
+    position = 0.0
+    entry_price = 0.0
+    stop_loss = 0.0
+    take_profit = 0.0
+    trades = []
+    equity_curve = []
+
+    for i in range(50, len(df)):
+        current_date = df.index[i]
+        price = df['Close'].iloc[i]
+        high = df['High'].iloc[i]
+        low = df['Low'].iloc[i]
+        atr = df['ATR'].iloc[i]
+        ma20 = df['MA20'].iloc[i]
+        ma50 = df['MA50'].iloc[i]
+
+        # 1. 持仓状态：检测止损或止盈
+        if position > 0:
+            if low <= stop_loss:  # 触发止损
+                sell_price = stop_loss
+                revenue = position * sell_price
+                profit = revenue - (position * entry_price)
+                capital += revenue
+                trades.append({
+                    "date": current_date, "type": "SELL (止损)", 
+                    "price": round(sell_price, 2), "profit": round(profit, 2), "capital": round(capital, 2)
+                })
+                position = 0.0
+            elif high >= take_profit:  # 触发止盈
+                sell_price = take_profit
+                revenue = position * sell_price
+                profit = revenue - (position * entry_price)
+                capital += revenue
+                trades.append({
+                    "date": current_date, "type": "SELL (止盈)", 
+                    "price": round(sell_price, 2), "profit": round(profit, 2), "capital": round(capital, 2)
+                })
+                position = 0.0
+
+        # 2. 空仓状态：寻找买入信号（金叉/均线支撑+趋势向上）
+        if position == 0:
+            is_uptrend = price > ma20 and ma20 > ma50
+            if is_uptrend and price <= df['EMA10'].iloc[i] * 1.005:  # 回踩 EMA10 买入
+                entry_price = price
+                stop_loss = entry_price - (2 * atr)
+                take_profit = entry_price + (2 * atr * risk_reward_ratio)
+                position = capital / entry_price
+                capital = 0.0  # 全仓模式
+                trades.append({
+                    "date": current_date, "type": "BUY", 
+                    "price": round(entry_price, 2), "profit": 0.0, "capital": round(position * entry_price, 2)
+                })
+
+        # 记录每日总资产
+        current_total = capital + (position * price)
+        equity_curve.append({"Date": current_date, "Capital": current_total})
+
+    equity_df = pd.DataFrame(equity_curve)
+    
+    # 算回测指标
+    if not equity_df.empty:
+        total_return = ((equity_df['Capital'].iloc[-1] - initial_capital) / initial_capital) * 100
+        equity_df['Max_Capital'] = equity_df['Capital'].cummax()
+        equity_df['Drawdown'] = (equity_df['Capital'] - equity_df['Max_Capital']) / equity_df['Max_Capital']
+        max_drawdown = equity_df['Drawdown'].min() * 100
+        
+        # 胜率计算
+        sell_trades = [t for t in trades if "SELL" in t['type']]
+        win_trades = [t for t in sell_trades if t['profit'] > 0]
+        win_rate = (len(win_trades) / len(sell_trades) * 100) if sell_trades else 0.0
+        
+        metrics = {
+            "initial_capital": initial_capital,
+            "final_capital": round(equity_df['Capital'].iloc[-1], 2),
+            "total_return": round(total_return, 2),
+            "max_drawdown": round(max_drawdown, 2),
+            "win_rate": round(win_rate, 1),
+            "total_trades": len(sell_trades)
+        }
+        return metrics, equity_df
+    return None, None
+
+# -----------------------------------------------------------------------------
+# 5. 专业级三分栏画图引擎
 # -----------------------------------------------------------------------------
 def render_professional_chart(sig_data):
     df = sig_data['df'].tail(90)
     
-    # 创建 3 行 1 列的三分栏画布，高度独立划分 (60% / 20% / 20%)
     fig = make_subplots(
         rows=3, cols=1, 
         shared_xaxes=True, 
@@ -385,7 +479,6 @@ def render_professional_chart(sig_data):
         )
     )
 
-    # --- ROW 1: 主图 (K线与买点轨道) ---
     fig.add_trace(go.Candlestick(
         x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
         name="K线", increasing_line_color='#00ff66', decreasing_line_color='#ff3366'
@@ -394,23 +487,19 @@ def render_professional_chart(sig_data):
     fig.add_trace(go.Scatter(x=df.index, y=df['VWAP'], line=dict(color='#ff00ea', width=1.2, dash='dot'), name="VWAP (机构成本)"), row=1, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['EMA10'], line=dict(color='#00f0ff', width=1.2), name="EMA10 (短期快线)"), row=1, col=1)
 
-    # 绘制双买点虚线
     fig.add_hline(y=sig_data['near_market_buy'], line_dash="dash", line_color="#ccff00", annotation_text=" ⚡ Near-Market Buy (贴合)", row=1, col=1)
     fig.add_hline(y=sig_data['ideal_buy_price'], line_dash="dash", line_color="#00ff66", annotation_text=" 🎯 Ideal Dip Buy (理想)", row=1, col=1)
     fig.add_hline(y=sig_data['stop_loss'], line_dash="dash", line_color="#ff3366", annotation_text=" 🛡️ Stop Loss (止损)", row=1, col=1)
 
-    # --- ROW 2: 独立 MACD 副图 ---
     colors = np.where(df['MACD_Hist'] >= 0, '#00ff66', '#ff3366')
     fig.add_trace(go.Bar(x=df.index, y=df['MACD_Hist'], marker_color=colors, name="MACD Hist"), row=2, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['MACD'], line=dict(color='#00f0ff', width=1), name="DIF (快线)"), row=2, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['MACD_Signal'], line=dict(color='#ffaa00', width=1), name="DEA (慢线)"), row=2, col=1)
 
-    # --- ROW 3: 独立 RSI 副图 ---
     fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='#ab47bc', width=1.5), name="RSI"), row=3, col=1)
     fig.add_hline(y=70, line_dash="dot", line_color="#ff3366", opacity=0.7, row=3, col=1)
     fig.add_hline(y=30, line_dash="dot", line_color="#00ff66", opacity=0.7, row=3, col=1)
 
-    # 布局外观全方位极简优化
     fig.update_layout(
         template="plotly_dark",
         paper_bgcolor='#0b0e14',
@@ -428,7 +517,7 @@ def render_professional_chart(sig_data):
     return fig
 
 # -----------------------------------------------------------------------------
-# 5. Streamlit 用户交互 UI
+# 6. Streamlit 用户交互 UI
 # -----------------------------------------------------------------------------
 st.markdown('<h2 class="tech-header">⚡ QUANTUM TERMINAL PRO</h2>', unsafe_allow_html=True)
 
@@ -437,7 +526,13 @@ if 'selected_ticker' not in st.session_state:
 
 with st.sidebar:
     st.markdown("### 🎛️ 终端功能选单")
-    app_mode = st.radio("选择运行模式", ["🚀 自动扫描 & 智能推荐", "🔍 单标的全量诊断", "📊 自选清单监控"])
+    # 增加了回测引擎菜单选项
+    app_mode = st.radio("选择运行模式", [
+        "🚀 自动扫描 & 智能推荐", 
+        "🔍 单标的全量诊断", 
+        "🧪 策略历史回测引擎", 
+        "📊 自选清单监控"
+    ])
     st.markdown("---")
     rr_ratio = st.slider("目标盈亏比 (Risk-Reward)", 1.0, 4.0, 2.0, 0.5)
 
@@ -609,7 +704,89 @@ elif app_mode == "🔍 单标的全量诊断":
                     add_to_watchlist(sig['symbol'], sig['name'], "推荐自选")
                     st.success("已成功保存！")
 
-# --- 模式 3: 持仓自选清单监控 ---
+# --- 模式 3: 新增历史策略回测引擎 UI ---
+elif app_mode == "🧪 策略历史回测引擎":
+    st.markdown("### 🧪 策略历史回测与绩效分析 (Backtest Engine)")
+    st.caption("基于您设定的盈亏比与买卖信号算法，对标的近 2 年的历史数据进行全量真实仿真回测。")
+
+    c_bt_sym, c_bt_cap, c_bt_btn = st.columns([2, 2, 1.5])
+    with c_bt_sym:
+        bt_symbol = st.text_input("回测股票代码", value="NVDA").upper().strip()
+    with c_bt_cap:
+        init_capital = st.number_input("初始资金 ($)", value=10000, step=1000)
+    with c_bt_btn:
+        st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+        run_bt = st.button("🚀 启动回测", use_container_width=True)
+
+    if run_bt or 'bt_metrics' in st.session_state:
+        if run_bt:
+            with st.spinner("正在抓取历史数据计算回测绩效..."):
+                metrics, equity_df = run_backtest_engine(bt_symbol, initial_capital=float(init_capital), risk_reward_ratio=rr_ratio)
+                st.session_state.bt_metrics = metrics
+                st.session_state.bt_equity = equity_df
+
+        metrics = st.session_state.bt_metrics
+        equity_df = st.session_state.bt_equity
+
+        if metrics and equity_df is not None:
+            # 渲染核心绩效 Card
+            m1, m2, m3, m4, m5 = st.columns(5)
+            with m1:
+                st.markdown(f"""
+                <div class="tech-card">
+                    <div class="metric-title">初始资金</div>
+                    <div style="font-size:18px; font-weight:700; color:#ffffff;">${metrics['initial_capital']:,.2f}</div>
+                </div>""", unsafe_allow_html=True)
+            with m2:
+                ret_color = "#00ff66" if metrics['total_return'] >= 0 else "#ff3366"
+                st.markdown(f"""
+                <div class="tech-card">
+                    <div class="metric-title">累计总收益率</div>
+                    <div style="font-size:18px; font-weight:700; color:{ret_color};">{metrics['total_return']}%</div>
+                    <div style="font-size:10px; color:{ret_color};">最终资产: ${metrics['final_capital']:,.2f}</div>
+                </div>""", unsafe_allow_html=True)
+            with m3:
+                st.markdown(f"""
+                <div class="tech-card">
+                    <div class="metric-title">策略胜率</div>
+                    <div style="font-size:18px; font-weight:700; color:#00f0ff;">{metrics['win_rate']}%</div>
+                    <div style="font-size:10px; color:#8b949e;">总交易次数: {metrics['total_trades']} 次</div>
+                </div>""", unsafe_allow_html=True)
+            with m4:
+                st.markdown(f"""
+                <div class="tech-card">
+                    <div class="metric-title">历史最大回撤</div>
+                    <div style="font-size:18px; font-weight:700; color:#ff3366;">{metrics['max_drawdown']}%</div>
+                    <div style="font-size:10px; color:#8b949e;">风控安全阀</div>
+                </div>""", unsafe_allow_html=True)
+            with m5:
+                st.markdown(f"""
+                <div class="tech-card">
+                    <div class="metric-title">盈亏比设定</div>
+                    <div style="font-size:18px; font-weight:700; color:#ccff00;">1 : {rr_ratio}</div>
+                    <div style="font-size:10px; color:#8b949e;">动态 ATR 追踪</div>
+                </div>""", unsafe_allow_html=True)
+
+            # 资金增长曲线图
+            fig_equity = go.Figure()
+            fig_equity.add_trace(go.Scatter(
+                x=equity_df['Date'], y=equity_df['Capital'], 
+                mode='lines', line=dict(color='#00f0ff', width=2),
+                name='账户总资产'
+            ))
+            fig_equity.update_layout(
+                title=f"📈 {bt_symbol} 策略资产净值曲线 (Equity Curve)",
+                template="plotly_dark",
+                paper_bgcolor='#0b0e14',
+                plot_bgcolor='#161b22',
+                height=450,
+                margin=dict(l=15, r=15, t=40, b=15)
+            )
+            st.plotly_chart(fig_equity, use_container_width=True)
+        else:
+            st.error("数据不足或无法完成回测，请换个股票代码重试。")
+
+# --- 模式 4: 持仓自选清单监控 ---
 elif app_mode == "📊 自选清单监控":
     st.markdown("### 📋 本地自选清单量化矩阵")
     df_w = get_watchlist()
