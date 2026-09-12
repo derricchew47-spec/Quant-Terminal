@@ -1,6 +1,6 @@
 # ============================================================================
 # QuantumSignal Terminal ULTRA | Bull/Bear Adaptive Quantitative System
-# Version: ULTRA_4.4_PRECISION
+# Version: ULTRA_4.5_PORTFOLIO_BT
 # ============================================================================
 
 import html
@@ -17,7 +17,7 @@ from plotly.subplots import make_subplots
 import streamlit as st
 import yfinance as yf
 
-VERSION = "ULTRA_4.4_PRECISION"
+VERSION = "ULTRA_4.5_PORTFOLIO_BT"
 
 # -----------------------------------------------------------------------------
 # 1. 页面配置与 Cyberpunk 视觉样式
@@ -321,37 +321,28 @@ def indicators(frame, benchmark=None):
         d["Relative63"] = 0.0
         d["MarketOK"] = True
 
-    # -------------------------------------------------------------------------
-    # 精细量化打分矩阵 (Scoring Matrix 满分 100 分)
-    # -------------------------------------------------------------------------
-    # 1. 均线与趋势结构 (最高 30 分)
+    # Scoring Matrix (满分 100 分)
     trend_score = (
         (c > d.EMA10).astype(int) * 8
         + (d.EMA10 > d.EMA20).astype(int) * 8
         + (d.EMA20 > d.MA50).astype(int) * 8
         + (d.MA50 > d.MA200).astype(int) * 6
     )
-
-    # 2. MACD 强弱度 (最高 25 分)
     macd_score = (
         (d.MACD > 0).astype(int) * 10
         + (d.Hist > 0).astype(int) * 10
         + (d.Hist > d.Hist.shift(1)).astype(int) * 5
     )
-
-    # 3. RSI 健康度 (最高 20 分)
     rsi_score = pd.Series(0, index=d.index)
     rsi_score += np.where(d.RSI.between(52, 68), 20, 0)
     rsi_score += np.where(d.RSI.between(45, 52) | d.RSI.between(68, 75), 12, 0)
     rsi_score += np.where(d.RSI.between(35, 45), 5, 0)
 
-    # 4. Alpha 相对大盘强度 (最高 15 分)
     alpha_score = pd.Series(0, index=d.index)
     alpha_score += np.where(d.Relative63 > 15, 15, 0)
     alpha_score += np.where((d.Relative63 > 5) & (d.Relative63 <= 15), 10, 0)
     alpha_score += np.where((d.Relative63 > 0) & (d.Relative63 <= 5), 5, 0)
 
-    # 5. 量能与波动率健康度 (最高 10 分)
     vol_score = (
         (v > v.rolling(20).mean()).astype(int) * 5
         + (d.ATRpct.between(1.5, 7.0)).astype(int) * 5
@@ -362,10 +353,7 @@ def indicators(frame, benchmark=None):
 
 
 def analyze_technical_aspects(row):
-    """提取深度技术面形态诊断"""
     features = {}
-
-    # 均线形态
     if row["EMA10"] > row["EMA20"] and row["EMA20"] > row["MA50"]:
         features["ma_status"] = "🟢 完美多头排列 (EMA10 > EMA20 > MA50)"
         features["ma_tag"] = "tag-bull"
@@ -376,7 +364,6 @@ def analyze_technical_aspects(row):
         features["ma_status"] = "🔴 空头受压 (Close < MA50)"
         features["ma_tag"] = "tag-bear"
 
-    # MACD 形态
     if row["MACD"] > 0 and row["Hist"] > 0:
         features["macd_status"] = "🟢 零轴上方金叉主升 (MACD & Hist 双正)"
         features["macd_tag"] = "tag-bull"
@@ -387,7 +374,6 @@ def analyze_technical_aspects(row):
         features["macd_status"] = "🔴 死柱向下调整 (Hist < 0)"
         features["macd_tag"] = "tag-bear"
 
-    # RSI 形态
     rsi_val = row["RSI"]
     if 50 <= rsi_val <= 68:
         features["rsi_status"] = f"🟢 黄金动力区 (RSI: {rsi_val:.1f})"
@@ -399,7 +385,6 @@ def analyze_technical_aspects(row):
         features["rsi_status"] = f"🔴 动能弱势/超卖 (RSI: {rsi_val:.1f})"
         features["rsi_tag"] = "tag-bear"
 
-    # 大盘相对强度 Alpha
     rel = row.get("Relative63", 0.0)
     if rel > 10:
         features["alpha_status"] = f"🚀 显著跑赢大盘 (超额收益 +{rel:.1f}%)"
@@ -475,7 +460,7 @@ def make_signal(symbol, frame, cfg, benchmark):
 
 
 # -----------------------------------------------------------------------------
-# 6. 回测引擎 (牛市移动止损 + 重新开仓)
+# 6. 回测引擎 (单标的 & 组合多标的全池回测)
 # -----------------------------------------------------------------------------
 def simulate(d, cfg=None, initial=10000.0, start=None):
     cfg = cfg or Config()
@@ -537,7 +522,7 @@ def simulate(d, cfg=None, initial=10000.0, start=None):
 
 
 # -----------------------------------------------------------------------------
-# 7. 3-Subplot 独立图表
+# 7. 3-Subplot 图表渲染
 # -----------------------------------------------------------------------------
 def render_segmented_chart(sig_data, days=120):
     d = sig_data["df"].tail(days)
@@ -636,7 +621,7 @@ if app_mode == "🚀 自动扫描 & 智能推荐":
         symbols = parse_symbols(custom_pool_str)
         benchmark = fetch_history("SPY", "3y")
         results = []
-        progress = st.progress(0, text="计算多维度 Scoring Matrix 打分中...")
+        progress = st.progress(0, text="多维 Scoring Matrix 量化打分中...")
         with ThreadPoolExecutor(max_workers=6) as executor:
             future_map = {executor.submit(fetch_history, s, "3y"): s for s in symbols}
             done = 0
@@ -681,10 +666,9 @@ if app_mode == "🚀 自动扫描 & 智能推荐":
                     st.session_state.target_page = "🔍 单标的全量诊断"
                     st.rerun()
 
-        # 补全全面数据列的扫描结果表格
         df_display = pd.DataFrame([{
             "代码": r["symbol"], 
-            "精细评分 (Score)": r["quant_score"], 
+            "精细评分": r["quant_score"], 
             "状态": r["summary"]["状态"], 
             "现价": f"${r['current_price']:.2f}", 
             "建议买入位": f"${r['plan']['entry']:.2f}" if r["plan"] else "N/A",
@@ -697,7 +681,7 @@ if app_mode == "🚀 自动扫描 & 智能推荐":
         st.dataframe(df_display, use_container_width=True, hide_index=True)
 
 # =============================================================================
-# TAB 2: 单标的全量诊断 (恢复全面技术特征面板)
+# TAB 2: 单标的全量诊断
 # =============================================================================
 elif app_mode == "🔍 单标的全量诊断":
     st.markdown("### 🔍 标的深度诊断")
@@ -719,7 +703,6 @@ elif app_mode == "🔍 单标的全量诊断":
         p = sig["plan"]
         td = sig["tech_diag"]
 
-        # 指标卡片
         html_cards = (
             metric_card("现价 / 综合评分", f"${sig['current_price']:.2f} ({sig['quant_score']}分)")
             + metric_card("自适应买入位", f"${p['entry']:.2f}" if p else "N/A", "metric-buy")
@@ -728,7 +711,6 @@ elif app_mode == "🔍 单标的全量诊断":
         )
         st.markdown(f"<div style='display:grid;grid-template-columns:repeat(4,1fr);gap:10px'>{html_cards}</div>", unsafe_allow_html=True)
         
-        # 恢复深度技术特征诊断面板
         st.markdown(f"""
         <div class='diag-box'>
             <div style='font-size:14px;font-weight:700;color:#00f0ff;margin-bottom:8px;'>📊 {sym} 技术面深度特征提取</div>
@@ -746,44 +728,99 @@ elif app_mode == "🔍 单标的全量诊断":
 
         st.plotly_chart(render_segmented_chart(sig), use_container_width=True)
     else:
-        st.error(f"无法获取代码 {sym} 的行情数据，请检查代码。")
+        st.error(f"无法获取代码 {sym} 的行情数据。")
 
 # =============================================================================
-# TAB 3: 策略历史回测引擎
+# TAB 3: 策略历史回测引擎 (新增：支持全池多标的并行回测)
 # =============================================================================
 elif app_mode == "🧪 策略历史回测引擎":
     st.markdown("### 🧪 牛熊自适应策略回测引擎")
-    with st.form("bt_form"):
-        c1, c2, c3 = st.columns([2, 2, 1])
-        with c1: bt_sym = st.text_input("回测代码", value=st.session_state.selected_ticker).upper()
-        with c2: start_d = st.date_input("开始日期", value=pd.Timestamp("2026-01-01"))
-        with c3:
-            st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-            run_bt = st.form_submit_button("🚀 运行回测")
+    
+    bt_mode = st.radio("回测模式选择", ["🎯 单标的深度回测", "🌐 股票池全池组合回测"], horizontal=True)
 
-    if run_bt:
-        frame = fetch_history(bt_sym, "5y")
-        benchmark = fetch_history("SPY", "5y")
-        if frame is not None and benchmark is not None:
-            d = indicators(frame, benchmark)
-            metrics, eq, ledger = simulate(d, cfg, initial=st.session_state.capital, start=str(start_d))
+    if bt_mode == "🎯 单标的深度回测":
+        with st.form("bt_form"):
+            c1, c2, c3 = st.columns([2, 2, 1])
+            with c1: bt_sym = st.text_input("回测代码", value=st.session_state.selected_ticker).upper()
+            with c2: start_d = st.date_input("开始日期", value=pd.Timestamp("2026-01-01"))
+            with c3:
+                st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+                run_bt = st.form_submit_button("🚀 运行单标的回测")
 
-            html_bt_cards = (
-                metric_card("策略终值收益", f"{metrics['收益率%']:+.2f}%", "metric-good" if metrics['收益率%']>=0 else "metric-stop")
-                + metric_card("基准买入持有", f"{metrics['买入持有%']:+.2f}%")
-                + metric_card("最大回撤", f"{metrics['最大回撤%']:.2f}%", "metric-stop")
-                + metric_card("平仓胜率", f"{metrics['胜率%']:.1f}% ({metrics['已平仓笔数']}笔)", "metric-buy")
-            )
-            st.markdown(f"<div style='display:grid;grid-template-columns:repeat(4,1fr);gap:10px'>{html_bt_cards}</div>", unsafe_allow_html=True)
+        if run_bt:
+            frame = fetch_history(bt_sym, "5y")
+            benchmark = fetch_history("SPY", "5y")
+            if frame is not None and benchmark is not None:
+                d = indicators(frame, benchmark)
+                metrics, eq, ledger = simulate(d, cfg, initial=st.session_state.capital, start=str(start_d))
 
-            fig_eq = go.Figure()
-            fig_eq.add_trace(go.Scatter(x=eq.index, y=eq.Equity, name="Quantum 趋势追踪策略", line=dict(color="#00f0ff", width=2)))
-            fig_eq.add_trace(go.Scatter(x=eq.index, y=eq.Benchmark, name="标的买入持有", line=dict(color="#6e7681", width=1.5, dash="dot")))
-            fig_eq.update_layout(template="plotly_dark", paper_bgcolor="#0b0e14", plot_bgcolor="#161b22", height=380)
-            st.plotly_chart(fig_eq, use_container_width=True)
+                html_bt_cards = (
+                    metric_card("策略终值收益", f"{metrics['收益率%']:+.2f}%", "metric-good" if metrics['收益率%']>=0 else "metric-stop")
+                    + metric_card("基准买入持有", f"{metrics['买入持有%']:+.2f}%")
+                    + metric_card("最大回撤", f"{metrics['最大回撤%']:.2f}%", "metric-stop")
+                    + metric_card("平仓胜率", f"{metrics['胜率%']:.1f}% ({metrics['已平仓笔数']}笔)", "metric-buy")
+                )
+                st.markdown(f"<div style='display:grid;grid-template-columns:repeat(4,1fr);gap:10px'>{html_bt_cards}</div>", unsafe_allow_html=True)
 
-            st.markdown("#### 🧾 详细交易明细")
-            st.dataframe(ledger, use_container_width=True, hide_index=True)
+                fig_eq = go.Figure()
+                fig_eq.add_trace(go.Scatter(x=eq.index, y=eq.Equity, name="Quantum 趋势追踪策略", line=dict(color="#00f0ff", width=2)))
+                fig_eq.add_trace(go.Scatter(x=eq.index, y=eq.Benchmark, name="标的买入持有", line=dict(color="#6e7681", width=1.5, dash="dot")))
+                fig_eq.update_layout(template="plotly_dark", paper_bgcolor="#0b0e14", plot_bgcolor="#161b22", height=380)
+                st.plotly_chart(fig_eq, use_container_width=True)
+
+                st.markdown("#### 🧾 详细交易明细")
+                st.dataframe(ledger, use_container_width=True, hide_index=True)
+
+    else:
+        with st.form("pool_bt_form"):
+            c1, c2, c3 = st.columns([2.5, 3.5, 1.5])
+            with c1: bt_preset = st.selectbox("选择回测股票池", list(INDEX_PRESET_POOLS.keys()))
+            with c2: bt_pool_str = st.text_input("待回测代码清单", value=", ".join(INDEX_PRESET_POOLS[bt_preset]))
+            with c3:
+                st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+                run_pool_bt = st.form_submit_button("⚡ 运行股票池全量回测")
+
+        if run_pool_bt:
+            symbols = parse_symbols(bt_pool_str)
+            benchmark = fetch_history("SPY", "5y")
+            pool_results = []
+            progress = st.progress(0, text="正在对股票池并行逐项回测...")
+            
+            with ThreadPoolExecutor(max_workers=6) as executor:
+                future_map = {executor.submit(fetch_history, s, "5y"): s for s in symbols}
+                done = 0
+                for future in as_completed(future_map):
+                    s = future_map[future]
+                    done += 1
+                    frame = future.result()
+                    if frame is not None and benchmark is not None:
+                        try:
+                            d = indicators(frame, benchmark)
+                            metrics, _, _ = simulate(d, cfg, initial=10000.0, start="2026-01-01")
+                            metrics["代码"] = s
+                            pool_results.append(metrics)
+                        except Exception:
+                            pass
+                    progress.progress(done / len(symbols))
+            progress.empty()
+
+            if pool_results:
+                df_pool = pd.DataFrame(pool_results)
+                avg_ret = df_pool["收益率%"].mean()
+                avg_win = df_pool["胜率%"].mean()
+                avg_dd = df_pool["最大回撤%"].mean()
+
+                html_summary = (
+                    metric_card("全池平均策略收益", f"{avg_ret:+.2f}%", "metric-good" if avg_ret>=0 else "metric-stop")
+                    + metric_card("全池平均胜率", f"{avg_win:.1f}%", "metric-buy")
+                    + metric_card("全池平均最大回撤", f"{avg_dd:.2f}%", "metric-stop")
+                    + metric_card("总回测标的数量", f"{len(df_pool)} 只")
+                )
+                st.markdown(f"<div style='display:grid;grid-template-columns:repeat(4,1fr);gap:10px'>{html_summary}</div>", unsafe_allow_html=True)
+
+                # 展示全池所有股票的回测表现结果表
+                df_show = df_pool[["代码", "收益率%", "买入持有%", "胜率%", "最大回撤%", "已平仓笔数"]].sort_values(by="收益率%", ascending=False)
+                st.dataframe(df_show, use_container_width=True, hide_index=True)
 
 # =============================================================================
 # TAB 4: 自选清单监控
