@@ -152,8 +152,15 @@ st.markdown("""
 # -----------------------------------------------------------------------------
 # 2. State 初始化 & 自动抓取成分股预设池字典
 # -----------------------------------------------------------------------------
-if 'nav_mode' not in st.session_state:
-    st.session_state['nav_mode'] = "🚀 自动扫描 & 智能推荐"
+NAV_OPTIONS = [
+    "🚀 自动扫描 & 智能推荐", 
+    "🔍 单标的全量诊断", 
+    "🧪 策略历史回测引擎", 
+    "📊 自选清单监控"
+]
+
+if 'current_page' not in st.session_state:
+    st.session_state['current_page'] = NAV_OPTIONS[0]
 if 'selected_ticker' not in st.session_state:
     st.session_state['selected_ticker'] = "NVDA"
 
@@ -519,20 +526,24 @@ st.markdown('<h2 class="tech-header">⚡ QUANTUM TERMINAL PRO</h2>', unsafe_allo
 
 with st.sidebar:
     st.markdown("### 🎛️ 终端功能控制台")
-    app_mode = st.radio(
+    
+    current_idx = NAV_OPTIONS.index(st.session_state['current_page']) if st.session_state['current_page'] in NAV_OPTIONS else 0
+    
+    selected_menu = st.radio(
         "导航菜单",
-        [
-            "🚀 自动扫描 & 智能推荐", 
-            "🔍 单标的全量诊断", 
-            "🧪 策略历史回测引擎", 
-            "📊 自选清单监控"
-        ],
-        key="nav_mode",
+        NAV_OPTIONS,
+        index=current_idx,
         label_visibility="collapsed"
     )
+    
+    if selected_menu != st.session_state['current_page']:
+        st.session_state['current_page'] = selected_menu
+
     st.markdown("---")
     st.markdown("#### ⚙️ 策略风控设置")
     rr_ratio = st.slider("目标盈亏比 (Risk-Reward)", 1.0, 4.0, 2.0, 0.5)
+
+app_mode = st.session_state['current_page']
 
 # --- 模式 1: 自动化全市场扫描推荐 ---
 if app_mode == "🚀 自动扫描 & 智能推荐":
@@ -544,7 +555,6 @@ if app_mode == "🚀 自动扫描 & 智能推荐":
     with c_preset:
         selected_preset = st.selectbox("📦 选择预设行业/指数池", list(INDEX_PRESET_POOLS.keys()))
 
-    # 解析预设池或获取标普500
     if INDEX_PRESET_POOLS[selected_preset] == "SP500_AUTO":
         default_pool_list = fetch_sp500_tickers()
     else:
@@ -596,10 +606,9 @@ if app_mode == "🚀 自动扫描 & 智能推荐":
                     </div>
                     """, unsafe_allow_html=True)
                     
-                    # 联动切换并重新加载页面
                     if st.button(f"🔍 查看 {res['symbol']} 诊断图表", key=f"btn_top_{res['symbol']}"):
                         st.session_state['selected_ticker'] = res['symbol']
-                        st.session_state['nav_mode'] = "🔍 单标的全量诊断"
+                        st.session_state['current_page'] = "🔍 单标的全量诊断"
                         st.rerun()
 
             st.markdown("---")
