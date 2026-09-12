@@ -1,5 +1,8 @@
-streamlit
-pandas
-yfinance
-plotly
-numpy
+streamlit==1.63.0
+pandas==2.2.3
+numpy==2.3.5
+yfinance==1.7.0
+plotly==7.0.0
+exchange_calendars==4.13.2
+requests==2.34.2
+lxml==6.1.1
