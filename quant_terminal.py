@@ -20,7 +20,41 @@ st.set_page_config(
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;600;700&display=swap');
-    
+    /* 将侧边栏 Radio 选项重构为可点击卡片 */
+div[data-testid="stSidebar"] div[data-testid="stMarkdownContainer"] p {
+    font-size: 13px;
+}
+
+div[data-testid="stSidebar"] .stRadio > div {
+    gap: 10px;
+}
+
+div[data-testid="stSidebar"] .stRadio > div > label {
+    background-color: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    padding: 12px 14px;
+    width: 100%;
+    cursor: pointer;
+    transition: all 0.25s ease-in-out;
+}
+
+div[data-testid="stSidebar"] .stRadio > div > label:hover {
+    border-color: #00f0ff;
+    background-color: #1c2129;
+    box-shadow: 0 0 10px rgba(0, 240, 255, 0.2);
+}
+
+/* 被选中的卡片高亮样式 */
+div[data-testid="stSidebar"] .stRadio > div > label[data-checked="true"] {
+    background: linear-gradient(135deg, rgba(0, 240, 255, 0.15) 0%, rgba(112, 0, 255, 0.15) 100%);
+    border: 1.5px solid #00f0ff !important;
+    box-shadow: 0 0 15px rgba(0, 240, 255, 0.3);
+}
+
+div[data-testid="stSidebar"] .stRadio > div > label > div:first-child {
+    display: none; /* 隐藏原生单选小圆圈 */
+}
     .stApp {
         background-color: #0b0e14;
         color: #c9d1d9;
@@ -525,15 +559,21 @@ if 'selected_ticker' not in st.session_state:
     st.session_state.selected_ticker = "NVDA"
 
 with st.sidebar:
-    st.markdown("### 🎛️ 终端功能选单")
-    # 增加了回测引擎菜单选项
-    app_mode = st.radio("选择运行模式", [
-        "🚀 自动扫描 & 智能推荐", 
-        "🔍 单标的全量诊断", 
-        "🧪 策略历史回测引擎", 
-        "📊 自选清单监控"
-    ])
+    st.markdown("### 🎛️ 终端功能控制台")
+    
+    app_mode = st.radio(
+        "导航菜单",
+        [
+            "🚀 自动扫描 & 智能推荐", 
+            "🔍 单标的全量诊断", 
+            "🧪 策略历史回测引擎", 
+            "📊 自选清单监控"
+        ],
+        label_visibility="collapsed"
+    )
+    
     st.markdown("---")
+    st.markdown("#### ⚙️ 策略风控参数")
     rr_ratio = st.slider("目标盈亏比 (Risk-Reward)", 1.0, 4.0, 2.0, 0.5)
 
 # --- 模式 1: 自动化全市场扫描推荐 ---
