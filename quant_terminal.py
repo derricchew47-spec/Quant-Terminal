@@ -1,6 +1,6 @@
 # ============================================================================
 # QuantumSignal Terminal ULTRA | Bull/Bear Adaptive Quantitative System
-# Version: ULTRA_4.2_FIXED
+# Version: ULTRA_4.3_STABLE
 # ============================================================================
 
 import html
@@ -17,10 +17,10 @@ from plotly.subplots import make_subplots
 import streamlit as st
 import yfinance as yf
 
-VERSION = "ULTRA_4.2_FIXED"
+VERSION = "ULTRA_4.3_STABLE"
 
 # -----------------------------------------------------------------------------
-# 1. 页面配置与 Cyberpunk 视觉样式 (修复顶部遮挡与一体化深色调)
+# 1. 页面配置与 Cyberpunk 视觉样式
 # -----------------------------------------------------------------------------
 st.set_page_config(
     page_title="QuantumSignal Terminal ULTRA",
@@ -99,20 +99,13 @@ st.markdown(
         padding: 10px 13px;
         margin: 8px 0 14px 0;
     }
-    .decision-box {
-        border:1px solid #30363d;
-        border-radius:10px;
-        background:#121821;
-        padding:12px;
-        margin:8px 0;
-    }
 </style>
 """,
     unsafe_allow_html=True,
 )
 
 # -----------------------------------------------------------------------------
-# 2. Session State / 全局路由单点击同步优化
+# 2. 路由与 Session State 管理（修复跳转报错）
 # -----------------------------------------------------------------------------
 NAV_OPTIONS = [
     "🚀 自动扫描 & 智能推荐",
@@ -120,6 +113,11 @@ NAV_OPTIONS = [
     "🧪 策略历史回测引擎",
     "📊 自选清单监控",
 ]
+
+# 安全重定向判断
+if "target_page" in st.session_state and st.session_state.target_page:
+    st.session_state.current_page = st.session_state.target_page
+    st.session_state.target_page = None
 
 for key, val in [
     ("current_page", NAV_OPTIONS[0]),
@@ -129,15 +127,9 @@ for key, val in [
     ("risk_pct", 0.5),
     ("min_score", 65),
     ("capital", 10000.0),
-    ("nav_radio", NAV_OPTIONS[0]),
 ]:
     if key not in st.session_state:
         st.session_state[key] = val
-
-
-def on_nav_change():
-    """解决左侧菜单需要点击两次才响应的问题"""
-    st.session_state.current_page = st.session_state.nav_radio
 
 
 # -----------------------------------------------------------------------------
@@ -150,9 +142,9 @@ class Config:
         risk_pct=0.5,
         max_position_pct=20.0,
         min_dollar_volume=10_000_000,
-        min_price=5.0,
-        max_atr_pct=8.0,
-        min_score=65,
+        min_price=2.0,
+        max_atr_pct=15.0,
+        min_score=60,
         fee_bps=5.0,
         slip_bps=5.0,
     ):
@@ -176,12 +168,14 @@ def cfg_from_session():
 
 
 # -----------------------------------------------------------------------------
-# 4. 股票池预设 & 数据库
+# 4. 深度扩展股票池预设 & 数据库
 # -----------------------------------------------------------------------------
 INDEX_PRESET_POOLS = {
-    "🔥 精选核心科技 (15只)": ["MU", "NVDA", "AAPL", "TSLA", "MSFT", "AMZN", "GOOGL", "META", "AMD", "AVGO", "PLTR", "QCOM", "SPY", "QQQ", "COIN"],
+    "🔥 核心巨头与科技 (15只)": ["MU", "NVDA", "AAPL", "TSLA", "MSFT", "AMZN", "GOOGL", "META", "AMD", "AVGO", "PLTR", "QCOM", "SPY", "QQQ", "COIN"],
+    "🧬 生物医药与前沿医疗 (含肿瘤突破/黑马)": ["LLY", "NVO", "MRNA", "BNTX", "REGN", "VRTX", "CRSP", "EDIT", "BEAM", "ILMN", "AMGN", "GILD", "BIIB", "TMO", "PFE"],
+    "🎮 T2/二线高动能成长股": ["TTWO", "U", "NET", "SNOW", "DDOG", "RBLX", "PATH", "DKNG", "CROX", "CELH", "SMCI", "ARM", "APP", "MSTR", "PLTR"],
     "💻 半导体与芯片产业链": ["NVDA", "AMD", "INTC", "TSM", "AVGO", "QCOM", "ASML", "MU", "TXN", "AMAT", "LRCX", "ADI", "KLAC", "ARM", "MRVL"],
-    "🌐 核心ETF与资产类别": ["SPY", "QQQ", "IWM", "SOXX", "XLV", "XLF", "XLE", "ARKK", "TLT", "GLD"],
+    "🌐 全球核心 ETF 组合": ["SPY", "QQQ", "IWM", "SOXX", "XBI", "XLV", "XLF", "XLE", "ARKK", "TLT", "GLD"],
 }
 
 
@@ -232,7 +226,7 @@ init_quant_db()
 
 
 # -----------------------------------------------------------------------------
-# 5. 行情与指标
+# 5. 行情与数据计算引擎
 # -----------------------------------------------------------------------------
 @st.cache_data(ttl=21600, show_spinner=False)
 def fetch_history(symbol: str, period: str = "3y"):
@@ -299,21 +293,18 @@ def indicators(frame, benchmark=None):
     d["DollarVolume"] = (c * v).rolling(20).mean()
     d["ATRpct"] = d.ATR / c * 100
     d["Support"] = l.rolling(20).min()
-    d["Return63"] = c.pct_change(63, fill_method=None)
 
     if benchmark is not None and not benchmark.empty:
         b = benchmark.Close.reindex(d.index)
-        d["Relative63"] = d.Return63 - b.pct_change(63, fill_method=None)
         d["MarketMA200"] = b.rolling(200).mean()
         d["MarketOK"] = b > d.MarketMA200
     else:
-        d["Relative63"] = np.nan
         d["MarketOK"] = True
 
     d["Score"] = (
         (c > d.MA50).astype(int) * 30
         + (d.MA50 > d.MA200).astype(int) * 30
-        + (d.RSI.between(40, 70)).astype(int) * 20
+        + (d.RSI.between(40, 75)).astype(int) * 20
         + (d.Hist > 0).astype(int) * 20
     )
     return d
@@ -330,14 +321,14 @@ def plan(row, cfg=None):
     if is_bear_market:
         reasons.append("🚫 熊市拦截：趋势处于下行通道")
 
-    is_super_bull = row.Close > row.MA50 and row.MA10 > row.MA20
+    is_super_bull = row.Close > row.MA50 and row.EMA10 > row.EMA20
 
     if is_super_bull and not is_bear_market:
         entry = max(float(row.EMA10), float(row.Close * 0.985))
-        buy_mode = "🚀 强牛趋势跟进"
+        buy_mode = "🚀 大牛市突破/主升跟进"
     else:
         entry = min(float(row.Close), float(row.EMA20))
-        buy_mode = "⚡ 逢低回踩"
+        buy_mode = "⚡ 逢低回踩跟进"
 
     stop = min(entry - 1.5 * row.ATR, row.Support - 0.25 * row.ATR)
     risk = entry - stop
@@ -378,7 +369,7 @@ def make_signal(symbol, frame, cfg, benchmark):
 
 
 # -----------------------------------------------------------------------------
-# 6. 重构：大牛市不踏空的回测引擎 (Trend Following Backtest)
+# 6. 牛熊趋势追踪回测引擎
 # -----------------------------------------------------------------------------
 def simulate(d, cfg=None, initial=10000.0, start=None):
     cfg = cfg or Config()
@@ -396,13 +387,10 @@ def simulate(d, cfg=None, initial=10000.0, start=None):
     for i in range(start_i, len(d)):
         row, prev, date = d.iloc[i], d.iloc[i - 1], d.index[i]
 
-        # 1. 处于持仓状态时：采用动态移动止损 (Trailing Stop)，不硬性封顶止盈，吃满牛市主升浪！
         if pos > 0:
-            # 动态抬升移动止损位
             trailing_stop = max(stop, float(row.High - 2.5 * row.ATR))
             stop = trailing_stop
 
-            # 触发止损/止盈出场
             if row.Low <= stop:
                 exit_price = min(row.Open, stop) if row.Open < stop else stop
                 proceeds = pos * exit_price * (1 - fee)
@@ -410,13 +398,11 @@ def simulate(d, cfg=None, initial=10000.0, start=None):
                 trades.append({"日期": date, "操作": "卖出", "原因": "移动止损/趋势保护", "价格": exit_price, "净盈亏": proceeds - basis})
                 pos = 0
 
-        # 2. 空仓状态时：若处于牛市主升浪，再次出现信号立刻重新开仓，避免被洗盘后彻底踏空！
         if pos == 0:
             p = plan(prev, cfg)
             if p and p["eligible"]:
                 fill_price = float(row.Open)
                 stop = p["stop"]
-                # 资金管理：允许根据账户资金分配
                 q = math.floor((cash * 0.95) / (fill_price * (1 + fee)))
                 if q > 0:
                     pos = q
@@ -425,15 +411,13 @@ def simulate(d, cfg=None, initial=10000.0, start=None):
                     cash -= basis
                     trades.append({"日期": date, "操作": "买入", "原因": p.get("buy_mode", "趋势开仓"), "价格": entry, "净盈亏": None})
 
-        # 资金曲线记录
         current_equity = cash + (pos * row.Close if pos > 0 else 0)
         curve.append({"Date": date, "Equity": current_equity, "Benchmark": initial * (row.Close / benchmark_entry)})
 
     eq = pd.DataFrame(curve).set_index("Date")
     ledger = pd.DataFrame(trades)
     sells = [t["净盈亏"] for t in trades if t["操作"] == "卖出" and t["净盈亏"] is not None]
-    gains = sum(max(0, p) for p in sells)
-    losses = -sum(min(0, p) for p in sells)
+
     final = float(eq.Equity.iloc[-1])
 
     metrics = {
@@ -448,13 +432,12 @@ def simulate(d, cfg=None, initial=10000.0, start=None):
 
 
 # -----------------------------------------------------------------------------
-# 7. 重构：分层、无缝一体化的专业 3 子图 K 线图表
+# 7. 一体化 Plotly 3-Subplot 独立图表
 # -----------------------------------------------------------------------------
 def render_segmented_chart(sig_data, days=120):
     d = sig_data["df"].tail(days)
     p = sig_data["plan"]
 
-    # 创建 3 行 1 列的子图，共享 X 轴
     fig = make_subplots(
         rows=3, cols=1,
         shared_xaxes=True,
@@ -463,7 +446,7 @@ def render_segmented_chart(sig_data, days=120):
         subplot_titles=None
     )
 
-    # --- Subplot 1: 主 K 线图与均线 ---
+    # Subplot 1: K线与均线
     fig.add_trace(go.Candlestick(
         x=d.index, open=d.Open, high=d.High, low=d.Low, close=d.Close,
         name="日K",
@@ -478,18 +461,17 @@ def render_segmented_chart(sig_data, days=120):
         fig.add_hline(y=p["entry"], line_dash="dash", line_color="#ccff00", annotation_text="买入参考", row=1, col=1)
         fig.add_hline(y=p["stop"], line_dash="dash", line_color="#ff3366", annotation_text="止损", row=1, col=1)
 
-    # --- Subplot 2: RSI 指标图 ---
+    # Subplot 2: RSI
     fig.add_trace(go.Scatter(x=d.index, y=d.RSI, name="RSI(14)", line=dict(color="#00f0ff", width=1.5)), row=2, col=1)
     fig.add_hline(y=70, line_dash="dot", line_color="#ff3366", row=2, col=1)
     fig.add_hline(y=30, line_dash="dot", line_color="#00ff66", row=2, col=1)
 
-    # --- Subplot 3: MACD 指标图 ---
+    # Subplot 3: MACD
     colors = np.where(d.Hist >= 0, '#00ff66', '#ff3366')
     fig.add_trace(go.Bar(x=d.index, y=d.Hist, name="MACD Hist", marker_color=colors), row=3, col=1)
     fig.add_trace(go.Scatter(x=d.index, y=d.MACD, name="DIF", line=dict(color="#00f0ff", width=1)), row=3, col=1)
     fig.add_trace(go.Scatter(x=d.index, y=d.MACDSignal, name="DEA", line=dict(color="#ffaa00", width=1)), row=3, col=1)
 
-    # 整体暗黑赛博风格统一控制，去除白色边框撕裂感
     fig.update_layout(
         template="plotly_dark",
         paper_bgcolor="#0b0e14",
@@ -515,16 +497,18 @@ def metric_card(title, value, css_class=""):
 st.markdown('<h3 class="tech-header">⚡ QUANTUM TERMINAL ULTRA</h3>', unsafe_allow_html=True)
 st.markdown('<div class="tech-subtitle">Bull/Bear Adaptive Quantitative System</div>', unsafe_allow_html=True)
 
-# 侧边栏：修复刷新滞后问题
+# 侧边栏导航控制
 with st.sidebar:
     st.markdown("### 🎛️ 终端控制台")
-    st.radio(
+    selected_nav = st.radio(
         "导航菜单",
         NAV_OPTIONS,
-        key="nav_radio",
-        on_change=on_nav_change,
         index=NAV_OPTIONS.index(st.session_state.current_page),
     )
+    if selected_nav != st.session_state.current_page:
+        st.session_state.current_page = selected_nav
+        st.rerun()
+
     st.markdown("---")
     st.session_state.rr_ratio = st.slider("目标盈亏比 (R/R)", 1.0, 5.0, float(st.session_state.rr_ratio), 0.5)
     st.session_state.risk_pct = st.slider("单笔风控 %", 0.1, 5.0, float(st.session_state.risk_pct), 0.1)
@@ -533,13 +517,15 @@ cfg = cfg_from_session()
 app_mode = st.session_state.current_page
 
 # =============================================================================
-# TAB 1: 自动扫描 & 智能推荐 (恢复 TOP3 一键跳转诊断功能)
+# TAB 1: 自动扫描 & 智能推荐
 # =============================================================================
 if app_mode == "🚀 自动扫描 & 智能推荐":
     st.markdown("### 🛰️ 市场全池自动扫描")
     c1, c2, c3 = st.columns([2.5, 3.5, 1.5])
-    with c1: selected_preset = st.selectbox("预设池", list(INDEX_PRESET_POOLS.keys()))
-    with c2: custom_pool_str = st.text_input("待扫描代码", value=", ".join(INDEX_PRESET_POOLS[selected_preset]))
+    with c1: 
+        selected_preset = st.selectbox("预设股票池", list(INDEX_PRESET_POOLS.keys()))
+    with c2: 
+        custom_pool_str = st.text_input("待扫描代码（可自由追加任意美股）", value=", ".join(INDEX_PRESET_POOLS[selected_preset]))
     with c3:
         st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
         run_scan = st.button("⚡ 启动扫描", use_container_width=True)
@@ -548,8 +534,8 @@ if app_mode == "🚀 自动扫描 & 智能推荐":
         symbols = parse_symbols(custom_pool_str)
         benchmark = fetch_history("SPY", "3y")
         results = []
-        progress = st.progress(0, text="分析中...")
-        with ThreadPoolExecutor(max_workers=4) as executor:
+        progress = st.progress(0, text="扫描行情与量化模型中...")
+        with ThreadPoolExecutor(max_workers=6) as executor:
             future_map = {executor.submit(fetch_history, s, "3y"): s for s in symbols}
             done = 0
             for future in as_completed(future_map):
@@ -569,9 +555,8 @@ if app_mode == "🚀 自动扫描 & 智能推荐":
     res = st.session_state.get("scan_results", [])
     if res:
         eligible_res = [r for r in res if r["eligible"]]
-        st.markdown(f"<div class='signal-strip'><b>扫描完成</b> · 候选达标标的 {len(eligible_res)} 只</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='signal-strip'><b>扫描完成</b> · 候选达标标的 {len(eligible_res)} 只 / 共扫描 {len(res)} 只</div>", unsafe_allow_html=True)
         
-        # TOP 3 包含跳转诊断按钮
         top3 = eligible_res[:3] if eligible_res else res[:3]
         cols = st.columns(len(top3))
         for i, r in enumerate(top3):
@@ -586,33 +571,34 @@ if app_mode == "🚀 自动扫描 & 智能推荐":
                     </div>""",
                     unsafe_allow_html=True,
                 )
-                # 一键跳转诊断按钮
-                if st.button(f"🔎 查看 {r['symbol']} 诊断", key=f"btn_to_diag_{r['symbol']}", use_container_width=True):
+                # 安全路由跳转，解决 StreamlitWidgetAlreadyInstantiatedError
+                if st.button(f"🔎 查看 {r['symbol']} 诊断", key=f"btn_diag_{r['symbol']}", use_container_width=True):
                     st.session_state.selected_ticker = r['symbol']
-                    st.session_state.current_page = "🔍 单标的全量诊断"
-                    st.session_state.nav_radio = "🔍 单标的全量诊断"
+                    st.session_state.target_page = "🔍 单标的全量诊断"
                     st.rerun()
 
         df_display = pd.DataFrame([{
             "代码": r["symbol"], 
-            "评分": r["quant_score"], 
+            "综合评分": r["quant_score"], 
             "状态": r["summary"]["状态"], 
             "现价": r["current_price"], 
-            "原因": r["summary"]["原因"]
+            "信号说明": r["summary"]["原因"]
         } for r in res])
         st.dataframe(df_display, use_container_width=True, hide_index=True)
 
 # =============================================================================
-# TAB 2: 单标的全量诊断 (新无缝分层图表)
+# TAB 2: 单标的全量诊断
 # =============================================================================
 elif app_mode == "🔍 单标的全量诊断":
     st.markdown("### 🔍 标的深度诊断")
     c1, c2 = st.columns([3, 1])
-    with c1: ticker_input = st.text_input("输入股票代码", value=st.session_state.selected_ticker).upper().strip()
+    with c1: 
+        ticker_input = st.text_input("输入股票代码（如 MU, T2, TTWO, LLY 等）", value=st.session_state.selected_ticker).upper().strip()
     with c2:
         st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
         if st.button("⚡ 诊断标的", use_container_width=True):
             st.session_state.selected_ticker = parse_symbols(ticker_input)[0]
+            st.rerun()
 
     sym = st.session_state.selected_ticker
     frame = fetch_history(sym, "3y")
@@ -630,11 +616,12 @@ elif app_mode == "🔍 单标的全量诊断":
         )
         st.markdown(f"<div style='display:grid;grid-template-columns:repeat(4,1fr);gap:10px'>{html_cards}</div>", unsafe_allow_html=True)
         
-        # 分层一体化图表渲染
         st.plotly_chart(render_segmented_chart(sig), use_container_width=True)
+    else:
+        st.error(f"无法获取代码 {sym} 的行情数据，请检查代码是否输入正确。")
 
 # =============================================================================
-# TAB 3: 策略历史回测引擎 (解决 MU 大牛市踏空问题)
+# TAB 3: 策略历史回测引擎
 # =============================================================================
 elif app_mode == "🧪 策略历史回测引擎":
     st.markdown("### 🧪 牛熊自适应策略回测引擎")
