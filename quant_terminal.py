@@ -1,6 +1,6 @@
 # ============================================================================
 # QuantumSignal Terminal ULTRA | Bull/Bear Adaptive Quantitative System
-# Version: ULTRA_4.3_STABLE
+# Version: ULTRA_4.4_PRECISION
 # ============================================================================
 
 import html
@@ -17,7 +17,7 @@ from plotly.subplots import make_subplots
 import streamlit as st
 import yfinance as yf
 
-VERSION = "ULTRA_4.3_STABLE"
+VERSION = "ULTRA_4.4_PRECISION"
 
 # -----------------------------------------------------------------------------
 # 1. 页面配置与 Cyberpunk 视觉样式
@@ -99,13 +99,31 @@ st.markdown(
         padding: 10px 13px;
         margin: 8px 0 14px 0;
     }
+    .diag-box {
+        background: #121821;
+        border: 1px solid #2d333b;
+        border-radius: 8px;
+        padding: 12px;
+        margin-bottom: 10px;
+    }
+    .diag-tag {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 4px;
+        font-size: 11px;
+        font-weight: 700;
+        margin-right: 6px;
+    }
+    .tag-bull { background: rgba(0,255,102,0.15); color: #00ff66; border: 1px solid #00ff66; }
+    .tag-bear { background: rgba(255,51,102,0.15); color: #ff3366; border: 1px solid #ff3366; }
+    .tag-neutral { background: rgba(0,240,255,0.15); color: #00f0ff; border: 1px solid #00f0ff; }
 </style>
 """,
     unsafe_allow_html=True,
 )
 
 # -----------------------------------------------------------------------------
-# 2. 路由与 Session State 管理（修复跳转报错）
+# 2. Session State / 全局路由跳转
 # -----------------------------------------------------------------------------
 NAV_OPTIONS = [
     "🚀 自动扫描 & 智能推荐",
@@ -114,7 +132,6 @@ NAV_OPTIONS = [
     "📊 自选清单监控",
 ]
 
-# 安全重定向判断
 if "target_page" in st.session_state and st.session_state.target_page:
     st.session_state.current_page = st.session_state.target_page
     st.session_state.target_page = None
@@ -144,7 +161,7 @@ class Config:
         min_dollar_volume=10_000_000,
         min_price=2.0,
         max_atr_pct=15.0,
-        min_score=60,
+        min_score=65,
         fee_bps=5.0,
         slip_bps=5.0,
     ):
@@ -168,7 +185,7 @@ def cfg_from_session():
 
 
 # -----------------------------------------------------------------------------
-# 4. 深度扩展股票池预设 & 数据库
+# 4. 股票池预设 & 数据库
 # -----------------------------------------------------------------------------
 INDEX_PRESET_POOLS = {
     "🔥 核心巨头与科技 (15只)": ["MU", "NVDA", "AAPL", "TSLA", "MSFT", "AMZN", "GOOGL", "META", "AMD", "AVGO", "PLTR", "QCOM", "SPY", "QQQ", "COIN"],
@@ -226,7 +243,7 @@ init_quant_db()
 
 
 # -----------------------------------------------------------------------------
-# 5. 行情与数据计算引擎
+# 5. 行情与多维精细评分矩阵 (Scoring Matrix)
 # -----------------------------------------------------------------------------
 @st.cache_data(ttl=21600, show_spinner=False)
 def fetch_history(symbol: str, period: str = "3y"):
@@ -293,21 +310,105 @@ def indicators(frame, benchmark=None):
     d["DollarVolume"] = (c * v).rolling(20).mean()
     d["ATRpct"] = d.ATR / c * 100
     d["Support"] = l.rolling(20).min()
+    d["Return63"] = c.pct_change(63, fill_method=None)
 
     if benchmark is not None and not benchmark.empty:
         b = benchmark.Close.reindex(d.index)
+        d["Relative63"] = (d.Return63 - b.pct_change(63, fill_method=None)) * 100
         d["MarketMA200"] = b.rolling(200).mean()
         d["MarketOK"] = b > d.MarketMA200
     else:
+        d["Relative63"] = 0.0
         d["MarketOK"] = True
 
-    d["Score"] = (
-        (c > d.MA50).astype(int) * 30
-        + (d.MA50 > d.MA200).astype(int) * 30
-        + (d.RSI.between(40, 75)).astype(int) * 20
-        + (d.Hist > 0).astype(int) * 20
+    # -------------------------------------------------------------------------
+    # 精细量化打分矩阵 (Scoring Matrix 满分 100 分)
+    # -------------------------------------------------------------------------
+    # 1. 均线与趋势结构 (最高 30 分)
+    trend_score = (
+        (c > d.EMA10).astype(int) * 8
+        + (d.EMA10 > d.EMA20).astype(int) * 8
+        + (d.EMA20 > d.MA50).astype(int) * 8
+        + (d.MA50 > d.MA200).astype(int) * 6
     )
+
+    # 2. MACD 强弱度 (最高 25 分)
+    macd_score = (
+        (d.MACD > 0).astype(int) * 10
+        + (d.Hist > 0).astype(int) * 10
+        + (d.Hist > d.Hist.shift(1)).astype(int) * 5
+    )
+
+    # 3. RSI 健康度 (最高 20 分)
+    rsi_score = pd.Series(0, index=d.index)
+    rsi_score += np.where(d.RSI.between(52, 68), 20, 0)
+    rsi_score += np.where(d.RSI.between(45, 52) | d.RSI.between(68, 75), 12, 0)
+    rsi_score += np.where(d.RSI.between(35, 45), 5, 0)
+
+    # 4. Alpha 相对大盘强度 (最高 15 分)
+    alpha_score = pd.Series(0, index=d.index)
+    alpha_score += np.where(d.Relative63 > 15, 15, 0)
+    alpha_score += np.where((d.Relative63 > 5) & (d.Relative63 <= 15), 10, 0)
+    alpha_score += np.where((d.Relative63 > 0) & (d.Relative63 <= 5), 5, 0)
+
+    # 5. 量能与波动率健康度 (最高 10 分)
+    vol_score = (
+        (v > v.rolling(20).mean()).astype(int) * 5
+        + (d.ATRpct.between(1.5, 7.0)).astype(int) * 5
+    )
+
+    d["Score"] = trend_score + macd_score + rsi_score + alpha_score + vol_score
     return d
+
+
+def analyze_technical_aspects(row):
+    """提取深度技术面形态诊断"""
+    features = {}
+
+    # 均线形态
+    if row["EMA10"] > row["EMA20"] and row["EMA20"] > row["MA50"]:
+        features["ma_status"] = "🟢 完美多头排列 (EMA10 > EMA20 > MA50)"
+        features["ma_tag"] = "tag-bull"
+    elif row["Close"] > row["MA50"]:
+        features["ma_status"] = "🟡 站上中轨 (Close > MA50)"
+        features["ma_tag"] = "tag-neutral"
+    else:
+        features["ma_status"] = "🔴 空头受压 (Close < MA50)"
+        features["ma_tag"] = "tag-bear"
+
+    # MACD 形态
+    if row["MACD"] > 0 and row["Hist"] > 0:
+        features["macd_status"] = "🟢 零轴上方金叉主升 (MACD & Hist 双正)"
+        features["macd_tag"] = "tag-bull"
+    elif row["Hist"] > 0:
+        features["macd_status"] = "🟡 水下金叉反弹 (Hist 向上)"
+        features["macd_tag"] = "tag-neutral"
+    else:
+        features["macd_status"] = "🔴 死柱向下调整 (Hist < 0)"
+        features["macd_tag"] = "tag-bear"
+
+    # RSI 形态
+    rsi_val = row["RSI"]
+    if 50 <= rsi_val <= 68:
+        features["rsi_status"] = f"🟢 黄金动力区 (RSI: {rsi_val:.1f})"
+        features["rsi_tag"] = "tag-bull"
+    elif rsi_val > 70:
+        features["rsi_status"] = f"⚠️ 超买高位警戒 (RSI: {rsi_val:.1f})"
+        features["rsi_tag"] = "tag-neutral"
+    else:
+        features["rsi_status"] = f"🔴 动能弱势/超卖 (RSI: {rsi_val:.1f})"
+        features["rsi_tag"] = "tag-bear"
+
+    # 大盘相对强度 Alpha
+    rel = row.get("Relative63", 0.0)
+    if rel > 10:
+        features["alpha_status"] = f"🚀 显著跑赢大盘 (超额收益 +{rel:.1f}%)"
+    elif rel > 0:
+        features["alpha_status"] = f"📈 微弱跑赢大盘 (+{rel:.1f}%)"
+    else:
+        features["alpha_status"] = f"📉 跑输大盘 ({rel:.1f}%)"
+
+    return features
 
 
 def plan(row, cfg=None):
@@ -319,7 +420,7 @@ def plan(row, cfg=None):
     reasons = []
     is_bear_market = not row.MarketOK or (row.Close < row.MA200 and row.MA50 < row.MA200)
     if is_bear_market:
-        reasons.append("🚫 熊市拦截：趋势处于下行通道")
+        reasons.append("🚫 熊市拦截：大盘或标的破位200日线")
 
     is_super_bull = row.Close > row.MA50 and row.EMA10 > row.EMA20
 
@@ -348,16 +449,21 @@ def plan(row, cfg=None):
         "buy_mode": buy_mode,
         "is_bear": is_bear_market,
         "is_super_bull": is_super_bull,
+        "atr_pct": float(row.ATRpct),
+        "relative63": float(row.get("Relative63", 0.0)),
     }
 
 
 def make_signal(symbol, frame, cfg, benchmark):
     d = indicators(frame, benchmark)
-    p = plan(d.iloc[-1], cfg)
+    last_row = d.iloc[-1]
+    p = plan(last_row, cfg)
+    tech_diag = analyze_technical_aspects(last_row)
     return {
         "symbol": symbol,
         "df": d,
         "plan": p,
+        "tech_diag": tech_diag,
         "current_price": float(d.Close.iloc[-1]),
         "quant_score": int(p["score"]) if p else 0,
         "eligible": bool(p["eligible"]) if p else False,
@@ -369,7 +475,7 @@ def make_signal(symbol, frame, cfg, benchmark):
 
 
 # -----------------------------------------------------------------------------
-# 6. 牛熊趋势追踪回测引擎
+# 6. 回测引擎 (牛市移动止损 + 重新开仓)
 # -----------------------------------------------------------------------------
 def simulate(d, cfg=None, initial=10000.0, start=None):
     cfg = cfg or Config()
@@ -417,7 +523,6 @@ def simulate(d, cfg=None, initial=10000.0, start=None):
     eq = pd.DataFrame(curve).set_index("Date")
     ledger = pd.DataFrame(trades)
     sells = [t["净盈亏"] for t in trades if t["操作"] == "卖出" and t["净盈亏"] is not None]
-
     final = float(eq.Equity.iloc[-1])
 
     metrics = {
@@ -432,7 +537,7 @@ def simulate(d, cfg=None, initial=10000.0, start=None):
 
 
 # -----------------------------------------------------------------------------
-# 7. 一体化 Plotly 3-Subplot 独立图表
+# 7. 3-Subplot 独立图表
 # -----------------------------------------------------------------------------
 def render_segmented_chart(sig_data, days=120):
     d = sig_data["df"].tail(days)
@@ -446,7 +551,6 @@ def render_segmented_chart(sig_data, days=120):
         subplot_titles=None
     )
 
-    # Subplot 1: K线与均线
     fig.add_trace(go.Candlestick(
         x=d.index, open=d.Open, high=d.High, low=d.Low, close=d.Close,
         name="日K",
@@ -461,12 +565,10 @@ def render_segmented_chart(sig_data, days=120):
         fig.add_hline(y=p["entry"], line_dash="dash", line_color="#ccff00", annotation_text="买入参考", row=1, col=1)
         fig.add_hline(y=p["stop"], line_dash="dash", line_color="#ff3366", annotation_text="止损", row=1, col=1)
 
-    # Subplot 2: RSI
     fig.add_trace(go.Scatter(x=d.index, y=d.RSI, name="RSI(14)", line=dict(color="#00f0ff", width=1.5)), row=2, col=1)
     fig.add_hline(y=70, line_dash="dot", line_color="#ff3366", row=2, col=1)
     fig.add_hline(y=30, line_dash="dot", line_color="#00ff66", row=2, col=1)
 
-    # Subplot 3: MACD
     colors = np.where(d.Hist >= 0, '#00ff66', '#ff3366')
     fig.add_trace(go.Bar(x=d.index, y=d.Hist, name="MACD Hist", marker_color=colors), row=3, col=1)
     fig.add_trace(go.Scatter(x=d.index, y=d.MACD, name="DIF", line=dict(color="#00f0ff", width=1)), row=3, col=1)
@@ -476,7 +578,7 @@ def render_segmented_chart(sig_data, days=120):
         template="plotly_dark",
         paper_bgcolor="#0b0e14",
         plot_bgcolor="#121821",
-        height=680,
+        height=660,
         margin=dict(l=15, r=15, t=10, b=15),
         showlegend=False,
         hovermode="x unified"
@@ -497,7 +599,6 @@ def metric_card(title, value, css_class=""):
 st.markdown('<h3 class="tech-header">⚡ QUANTUM TERMINAL ULTRA</h3>', unsafe_allow_html=True)
 st.markdown('<div class="tech-subtitle">Bull/Bear Adaptive Quantitative System</div>', unsafe_allow_html=True)
 
-# 侧边栏导航控制
 with st.sidebar:
     st.markdown("### 🎛️ 终端控制台")
     selected_nav = st.radio(
@@ -512,6 +613,7 @@ with st.sidebar:
     st.markdown("---")
     st.session_state.rr_ratio = st.slider("目标盈亏比 (R/R)", 1.0, 5.0, float(st.session_state.rr_ratio), 0.5)
     st.session_state.risk_pct = st.slider("单笔风控 %", 0.1, 5.0, float(st.session_state.risk_pct), 0.1)
+    st.session_state.min_score = st.slider("最低筛选评分门槛", 40, 95, int(st.session_state.min_score), 5)
 
 cfg = cfg_from_session()
 app_mode = st.session_state.current_page
@@ -525,7 +627,7 @@ if app_mode == "🚀 自动扫描 & 智能推荐":
     with c1: 
         selected_preset = st.selectbox("预设股票池", list(INDEX_PRESET_POOLS.keys()))
     with c2: 
-        custom_pool_str = st.text_input("待扫描代码（可自由追加任意美股）", value=", ".join(INDEX_PRESET_POOLS[selected_preset]))
+        custom_pool_str = st.text_input("待扫描代码（自由追加）", value=", ".join(INDEX_PRESET_POOLS[selected_preset]))
     with c3:
         st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
         run_scan = st.button("⚡ 启动扫描", use_container_width=True)
@@ -534,7 +636,7 @@ if app_mode == "🚀 自动扫描 & 智能推荐":
         symbols = parse_symbols(custom_pool_str)
         benchmark = fetch_history("SPY", "3y")
         results = []
-        progress = st.progress(0, text="扫描行情与量化模型中...")
+        progress = st.progress(0, text="计算多维度 Scoring Matrix 打分中...")
         with ThreadPoolExecutor(max_workers=6) as executor:
             future_map = {executor.submit(fetch_history, s, "3y"): s for s in symbols}
             done = 0
@@ -555,7 +657,7 @@ if app_mode == "🚀 自动扫描 & 智能推荐":
     res = st.session_state.get("scan_results", [])
     if res:
         eligible_res = [r for r in res if r["eligible"]]
-        st.markdown(f"<div class='signal-strip'><b>扫描完成</b> · 候选达标标的 {len(eligible_res)} 只 / 共扫描 {len(res)} 只</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='signal-strip'><b>扫描完成</b> · 候选达标标的 <b>{len(eligible_res)}</b> 只 / 共扫描 {len(res)} 只</div>", unsafe_allow_html=True)
         
         top3 = eligible_res[:3] if eligible_res else res[:3]
         cols = st.columns(len(top3))
@@ -565,29 +667,37 @@ if app_mode == "🚀 自动扫描 & 智能推荐":
             with cols[i]:
                 st.markdown(
                     f"""<div class='tech-card'>
-                    <div style='color:#00f0ff;font-weight:800;'>TOP {i+1} · {r['symbol']}</div>
-                    <div style='font-size:22px;font-weight:800;color:#fff'>${r['current_price']:.2f}</div>
-                    <div style='font-size:12px;color:#ccff00'>模式: {html.escape(buy_mode_str)}</div>
+                    <div style='display:flex;justify-content:space-between;'>
+                        <span style='color:#00f0ff;font-weight:800;'>TOP {i+1} · {r['symbol']}</span>
+                        <span style='color:#ccff00;font-weight:800;'>{r['quant_score']}分</span>
+                    </div>
+                    <div style='font-size:22px;font-weight:800;color:#fff;margin-top:4px;'>${r['current_price']:.2f}</div>
+                    <div style='font-size:12px;color:#8b949e'>模式: {html.escape(buy_mode_str)}</div>
                     </div>""",
                     unsafe_allow_html=True,
                 )
-                # 安全路由跳转，解决 StreamlitWidgetAlreadyInstantiatedError
                 if st.button(f"🔎 查看 {r['symbol']} 诊断", key=f"btn_diag_{r['symbol']}", use_container_width=True):
                     st.session_state.selected_ticker = r['symbol']
                     st.session_state.target_page = "🔍 单标的全量诊断"
                     st.rerun()
 
+        # 补全全面数据列的扫描结果表格
         df_display = pd.DataFrame([{
             "代码": r["symbol"], 
-            "综合评分": r["quant_score"], 
+            "精细评分 (Score)": r["quant_score"], 
             "状态": r["summary"]["状态"], 
-            "现价": r["current_price"], 
-            "信号说明": r["summary"]["原因"]
+            "现价": f"${r['current_price']:.2f}", 
+            "建议买入位": f"${r['plan']['entry']:.2f}" if r["plan"] else "N/A",
+            "建议止损位": f"${r['plan']['stop']:.2f}" if r["plan"] else "N/A",
+            "目标价": f"${r['plan']['target']:.2f}" if r["plan"] else "N/A",
+            "ATR波动率%": f"{r['plan']['atr_pct']:.2f}%" if r["plan"] else "N/A",
+            "相对大盘Alpha": f"{r['plan']['relative63']:+.2f}%" if r["plan"] else "N/A",
+            "信号及筛选说明": r["summary"]["原因"]
         } for r in res])
         st.dataframe(df_display, use_container_width=True, hide_index=True)
 
 # =============================================================================
-# TAB 2: 单标的全量诊断
+# TAB 2: 单标的全量诊断 (恢复全面技术特征面板)
 # =============================================================================
 elif app_mode == "🔍 单标的全量诊断":
     st.markdown("### 🔍 标的深度诊断")
@@ -607,18 +717,36 @@ elif app_mode == "🔍 单标的全量诊断":
     if frame is not None and benchmark is not None:
         sig = make_signal(sym, frame, cfg, benchmark)
         p = sig["plan"]
+        td = sig["tech_diag"]
 
+        # 指标卡片
         html_cards = (
-            metric_card("现价", f"${sig['current_price']:.2f}")
+            metric_card("现价 / 综合评分", f"${sig['current_price']:.2f} ({sig['quant_score']}分)")
             + metric_card("自适应买入位", f"${p['entry']:.2f}" if p else "N/A", "metric-buy")
             + metric_card("结构止损位", f"${p['stop']:.2f}" if p else "N/A", "metric-stop")
-            + metric_card("目标价", f"${p['target']:.2f}" if p else "N/A", "metric-take")
+            + metric_card("目标价 (盈亏比 " + str(cfg.rr) + ")", f"${p['target']:.2f}" if p else "N/A", "metric-take")
         )
         st.markdown(f"<div style='display:grid;grid-template-columns:repeat(4,1fr);gap:10px'>{html_cards}</div>", unsafe_allow_html=True)
         
+        # 恢复深度技术特征诊断面板
+        st.markdown(f"""
+        <div class='diag-box'>
+            <div style='font-size:14px;font-weight:700;color:#00f0ff;margin-bottom:8px;'>📊 {sym} 技术面深度特征提取</div>
+            <div style='display:grid;grid-template-columns:repeat(2,1fr);gap:10px;font-size:13px;'>
+                <div>• <b>均线排列结构</b>：<span class='diag-tag {td['ma_tag']}'>{td['ma_status']}</span></div>
+                <div>• <b>MACD 柱状图动能</b>：<span class='diag-tag {td['macd_tag']}'>{td['macd_status']}</span></div>
+                <div>• <b>RSI 震荡指标状态</b>：<span class='diag-tag {td['rsi_tag']}'>{td['rsi_status']}</span></div>
+                <div>• <b>大盘相对强度 (Alpha)</b>：<b>{td['alpha_status']}</b></div>
+            </div>
+            <div style='margin-top:8px;font-size:12px;color:#8b949e;border-top:1px solid #21262d;padding-top:6px;'>
+                💡 <b>系统综合建议</b>：{sig['summary']['原因']}
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
         st.plotly_chart(render_segmented_chart(sig), use_container_width=True)
     else:
-        st.error(f"无法获取代码 {sym} 的行情数据，请检查代码是否输入正确。")
+        st.error(f"无法获取代码 {sym} 的行情数据，请检查代码。")
 
 # =============================================================================
 # TAB 3: 策略历史回测引擎
@@ -674,9 +802,9 @@ else:
         if watch_results:
             df_w = pd.DataFrame([{
                 "代码": r["symbol"], 
-                "评分": r["quant_score"], 
-                "现价": r["current_price"], 
-                "买入参考": r.get("plan", {}).get("entry", 0.0),
-                "止损": r.get("plan", {}).get("stop", 0.0)
+                "精细评分": r["quant_score"], 
+                "现价": f"${r['current_price']:.2f}", 
+                "买入参考": f"${r.get('plan', {}).get('entry', 0.0):.2f}",
+                "止损参考": f"${r.get('plan', {}).get('stop', 0.0):.2f}"
             } for r in watch_results])
             st.dataframe(df_w, use_container_width=True, hide_index=True)
