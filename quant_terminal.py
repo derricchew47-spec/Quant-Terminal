@@ -8,13 +8,13 @@ import sqlite3
 from datetime import datetime
 
 # -----------------------------------------------------------------------------
-# 1. 页面配置与赛博黑客极简视觉样式 (Cyberpunk Dark Theme)
+# 1. 页面配置与移动端轻量级极简视觉 (Cyberpunk Dark Theme)
 # -----------------------------------------------------------------------------
 st.set_page_config(
     page_title="QuantumSignal Terminal PRO",
     page_icon="⚡",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="collapsed"  # 手机端默认折叠侧边栏，提升首次开屏渲染速度
 )
 
 st.markdown("""
@@ -32,16 +32,16 @@ st.markdown("""
         font-weight: 700;
         color: #00f0ff;
         text-shadow: 0 0 12px rgba(0, 240, 255, 0.4);
-        margin-bottom: 20px;
+        margin-bottom: 15px;
     }
     
     .tech-card {
         background: #161b22;
         border: 1px solid #30363d;
         border-radius: 8px;
-        padding: 14px;
-        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
-        margin-bottom: 12px;
+        padding: 12px;
+        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.5);
+        margin-bottom: 10px;
         position: relative;
     }
     
@@ -62,28 +62,28 @@ st.markdown("""
     }
 
     .metric-value-buy {
-        font-size: 20px;
+        font-size: 18px;
         font-weight: 700;
         color: #00ff66;
         text-shadow: 0 0 8px rgba(0, 255, 102, 0.3);
     }
 
     .metric-value-nearbuy {
-        font-size: 20px;
+        font-size: 18px;
         font-weight: 700;
         color: #ccff00;
         text-shadow: 0 0 8px rgba(204, 255, 0, 0.3);
     }
     
     .metric-value-stop {
-        font-size: 20px;
+        font-size: 18px;
         font-weight: 700;
         color: #ff3366;
         text-shadow: 0 0 8px rgba(255, 51, 102, 0.3);
     }
     
     .metric-value-take {
-        font-size: 20px;
+        font-size: 18px;
         font-weight: 700;
         color: #00f0ff;
         text-shadow: 0 0 8px rgba(0, 240, 255, 0.3);
@@ -92,43 +92,40 @@ st.markdown("""
     .news-card {
         background-color: #161b22;
         border-left: 3px solid #00f0ff;
-        padding: 10px 12px;
-        margin-bottom: 8px;
+        padding: 8px 10px;
+        margin-bottom: 6px;
         border-radius: 4px;
     }
 
-    /* 侧边栏 Radio 改造为卡片样式 */
+    /* 侧边栏按钮样式 */
     div[data-testid="stSidebar"] .stRadio > div {
-        gap: 10px;
+        gap: 8px;
     }
 
     div[data-testid="stSidebar"] .stRadio > div > label {
         background-color: #161b22;
         border: 1px solid #30363d;
         border-radius: 8px;
-        padding: 12px 14px;
+        padding: 10px 12px;
         width: 100%;
         cursor: pointer;
-        transition: all 0.25s ease-in-out;
+        transition: all 0.2s ease-in-out;
     }
 
     div[data-testid="stSidebar"] .stRadio > div > label:hover {
         border-color: #00f0ff;
         background-color: #1c2129;
-        box-shadow: 0 0 10px rgba(0, 240, 255, 0.2);
     }
 
     div[data-testid="stSidebar"] .stRadio > div > label[data-checked="true"] {
         background: linear-gradient(135deg, rgba(0, 240, 255, 0.15) 0%, rgba(112, 0, 255, 0.15) 100%);
         border: 1.5px solid #00f0ff !important;
-        box-shadow: 0 0 15px rgba(0, 240, 255, 0.3);
     }
 
     div[data-testid="stSidebar"] .stRadio > div > label > div:first-child {
         display: none;
     }
 
-    /* Streamlit 原生组件覆盖 */
     .stTextInput input, .stNumberInput input, .stSelectbox div {
         background-color: #0b0e14 !important;
         color: #00f0ff !important;
@@ -143,14 +140,13 @@ st.markdown("""
         border: none !important;
         font-weight: 700 !important;
         border-radius: 6px !important;
-        box-shadow: 0 0 15px rgba(0, 240, 255, 0.3) !important;
-        transition: all 0.3s ease;
+        box-shadow: 0 0 10px rgba(0, 240, 255, 0.3) !important;
     }
 </style>
 """, unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
-# 2. State 初始化 & 自动抓取成分股预设池字典
+# 2. State 初始化 & 懒加载预设池字典
 # -----------------------------------------------------------------------------
 NAV_OPTIONS = [
     "🚀 自动扫描 & 智能推荐", 
@@ -166,7 +162,8 @@ if 'selected_ticker' not in st.session_state:
 if 'rr_ratio' not in st.session_state:
     st.session_state['rr_ratio'] = 2.0
 
-@st.cache_data(ttl=86400)
+# 优化1：高时长 TTL 缓存（24小时），避免移动网络重复请求 Wikipedia 网页
+@st.cache_data(ttl=86400, show_spinner=False)
 def fetch_sp500_tickers():
     try:
         url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
@@ -187,7 +184,7 @@ INDEX_PRESET_POOLS = {
 }
 
 # -----------------------------------------------------------------------------
-# 3. SQLite 本地存储与数据库逻辑
+# 3. SQLite 本地存储
 # -----------------------------------------------------------------------------
 DB_FILE = "quant_terminal_watch.db"
 
@@ -224,7 +221,8 @@ init_quant_db()
 # -----------------------------------------------------------------------------
 # 4. 多维度量化指标计算 & 智能推选打分引擎
 # -----------------------------------------------------------------------------
-@st.cache_data(ttl=1800)
+# 优化2：隐藏加载 Spinners，提升手机流畅度
+@st.cache_data(ttl=1800, show_spinner=False)
 def fetch_advanced_quant_signals(symbol: str, risk_reward_ratio: float = 2.0, period: str = "1y"):
     if not symbol or not symbol.strip():
         return None
@@ -238,7 +236,6 @@ def fetch_advanced_quant_signals(symbol: str, risk_reward_ratio: float = 2.0, pe
         prev_close = float(df['Close'].iloc[-2])
         change_pct = ((current_price - prev_close) / prev_close) * 100
 
-        # ATR (真实波幅)
         df['High-Low'] = df['High'] - df['Low']
         df['High-Close'] = np.abs(df['High'] - df['Close'].shift(1))
         df['Low-Close'] = np.abs(df['Low'] - df['Close'].shift(1))
@@ -246,7 +243,6 @@ def fetch_advanced_quant_signals(symbol: str, risk_reward_ratio: float = 2.0, pe
         df['ATR'] = df['TR'].rolling(window=14).mean()
         atr = float(df['ATR'].iloc[-1])
 
-        # 布林带 (20, 2)
         df['MA20'] = df['Close'].rolling(window=20).mean()
         df['STD20'] = df['Close'].rolling(window=20).std()
         df['Upper_Band'] = df['MA20'] + (2 * df['STD20'])
@@ -254,13 +250,11 @@ def fetch_advanced_quant_signals(symbol: str, risk_reward_ratio: float = 2.0, pe
         lower_band = float(df['Lower_Band'].iloc[-1])
         upper_band = float(df['Upper_Band'].iloc[-1])
 
-        # EMA10 & VWAP
         df['EMA10'] = df['Close'].ewm(span=10, adjust=False).mean()
         ema10 = float(df['EMA10'].iloc[-1])
         df['VWAP'] = (df['Volume'] * (df['High'] + df['Low'] + df['Close']) / 3).cumsum() / df['Volume'].cumsum()
         vwap = float(df['VWAP'].iloc[-1])
 
-        # RSI (14)
         delta = df['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
@@ -268,7 +262,6 @@ def fetch_advanced_quant_signals(symbol: str, risk_reward_ratio: float = 2.0, pe
         df['RSI'] = 100 - (100 / (1 + rs))
         rsi = float(df['RSI'].iloc[-1])
 
-        # MACD (12, 26, 9)
         exp1 = df['Close'].ewm(span=12, adjust=False).mean()
         exp2 = df['Close'].ewm(span=26, adjust=False).mean()
         df['MACD'] = exp1 - exp2
@@ -279,7 +272,6 @@ def fetch_advanced_quant_signals(symbol: str, risk_reward_ratio: float = 2.0, pe
         is_macd_bullish = macd_val > macd_sig
         macd_status = "🟢 金叉 (Bullish)" if is_macd_bullish else "🔴 死叉 (Bearish)"
 
-        # Supertrend
         st_multiplier, st_period = 3.0, 10
         hl2 = (df['High'] + df['Low']) / 2
         df['Basic_UB'] = hl2 + (st_multiplier * df['ATR'])
@@ -296,7 +288,6 @@ def fetch_advanced_quant_signals(symbol: str, risk_reward_ratio: float = 2.0, pe
         ma20 = float(df['MA20'].iloc[-1])
         ma50 = float(df['MA50'].iloc[-1]) if len(df) >= 50 else ma20
 
-        # 趋势判定算法
         if current_price > ma20 and ma20 > ma50:
             trend_label = "🔥 强力多头 (Strong Uptrend)"
             trend_code = "UPTREND"
@@ -321,7 +312,6 @@ def fetch_advanced_quant_signals(symbol: str, risk_reward_ratio: float = 2.0, pe
         stop_loss = near_market_buy - (2 * atr)
         take_profit = near_market_buy + (2 * atr * risk_reward_ratio)
 
-        # 新闻情绪提取
         news_list = []
         news_sentiment_score = 0
         try:
@@ -343,7 +333,6 @@ def fetch_advanced_quant_signals(symbol: str, risk_reward_ratio: float = 2.0, pe
         except Exception:
             pass
 
-        # 多维度打分机制
         quant_score = 0
         if trend_code == "UPTREND": quant_score += 30
         elif trend_code == "RECOVERY": quant_score += 18
@@ -391,7 +380,7 @@ def fetch_advanced_quant_signals(symbol: str, risk_reward_ratio: float = 2.0, pe
 # -----------------------------------------------------------------------------
 # 5. 高级历史回测引擎 (带移动止损与突破双重触发)
 # -----------------------------------------------------------------------------
-@st.cache_data(ttl=1800)
+@st.cache_data(ttl=1800, show_spinner=False)
 def run_backtest_engine(symbol: str, initial_capital: float = 10000.0, risk_reward_ratio: float = 2.0, period: str = "2y"):
     ticker = yf.Ticker(symbol.upper().strip())
     df = ticker.history(period=period)
@@ -492,17 +481,19 @@ def run_backtest_engine(symbol: str, initial_capital: float = 10000.0, risk_rewa
     return None, None
 
 # -----------------------------------------------------------------------------
-# 6. 专业级三分栏画图引擎
+# 6. 移动端轻量级画图引擎 (渲染节点减半，禁用全屏卡顿工具条)
 # -----------------------------------------------------------------------------
 def render_professional_chart(sig_data):
-    df = sig_data['df'].tail(90)
+    # 优化3：手机端限制只渲染最新 45 天 K 线，体积缩小一倍，秒级渲染
+    df = sig_data['df'].tail(45)
+    
     fig = make_subplots(
         rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.04,
         row_heights=[0.6, 0.2, 0.2],
         subplot_titles=(
-            f"📈 {sig_data['symbol']} 主图 (K线 / 均线 / VWAP / 买点轨道)", 
-            "📊 MACD 动能量能柱", 
-            "⚡ RSI 相对强弱动能"
+            f"📈 {sig_data['symbol']} 主图", 
+            "📊 MACD 动能量能", 
+            "⚡ RSI 相对强弱"
         )
     )
 
@@ -514,9 +505,9 @@ def render_professional_chart(sig_data):
     fig.add_trace(go.Scatter(x=df.index, y=df['VWAP'], line=dict(color='#ff00ea', width=1.2, dash='dot'), name="VWAP"), row=1, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['EMA10'], line=dict(color='#00f0ff', width=1.2), name="EMA10"), row=1, col=1)
 
-    fig.add_hline(y=sig_data['near_market_buy'], line_dash="dash", line_color="#ccff00", annotation_text=" ⚡ Near-Market Buy", row=1, col=1)
-    fig.add_hline(y=sig_data['ideal_buy_price'], line_dash="dash", line_color="#00ff66", annotation_text=" 🎯 Ideal Dip Buy", row=1, col=1)
-    fig.add_hline(y=sig_data['stop_loss'], line_dash="dash", line_color="#ff3366", annotation_text=" 🛡️ Stop Loss", row=1, col=1)
+    fig.add_hline(y=sig_data['near_market_buy'], line_dash="dash", line_color="#ccff00", annotation_text="⚡ 买点", row=1, col=1)
+    fig.add_hline(y=sig_data['ideal_buy_price'], line_dash="dash", line_color="#00ff66", annotation_text="🎯 理想买", row=1, col=1)
+    fig.add_hline(y=sig_data['stop_loss'], line_dash="dash", line_color="#ff3366", annotation_text="🛡️ 止损", row=1, col=1)
 
     colors = np.where(df['MACD_Hist'] >= 0, '#00ff66', '#ff3366')
     fig.add_trace(go.Bar(x=df.index, y=df['MACD_Hist'], marker_color=colors, name="MACD Hist"), row=2, col=1)
@@ -529,8 +520,7 @@ def render_professional_chart(sig_data):
 
     fig.update_layout(
         template="plotly_dark", paper_bgcolor='#0b0e14', plot_bgcolor='#161b22',
-        margin=dict(l=15, r=15, t=30, b=15), height=720, showlegend=True,
-        legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="right", x=1),
+        margin=dict(l=10, r=10, t=25, b=10), height=550, showlegend=False, # 隐藏图例提高手机屏幕利用率
         xaxis3_rangeslider_visible=False
     )
     fig.update_xaxes(showgrid=True, gridcolor='#21262d')
@@ -538,16 +528,15 @@ def render_professional_chart(sig_data):
     return fig
 
 # -----------------------------------------------------------------------------
-# 7. UI 主体逻辑与交互路由 (包含事件回调 & 彻底解决重复点击卡顿)
+# 7. UI 主体逻辑与无卡顿交互路由
 # -----------------------------------------------------------------------------
-st.markdown('<h2 class="tech-header">⚡ QUANTUM TERMINAL PRO</h2>', unsafe_allow_html=True)
+st.markdown('<h3 class="tech-header">⚡ QUANTUM TERMINAL PRO</h3>', unsafe_allow_html=True)
 
 def on_nav_change():
     st.session_state['current_page'] = st.session_state['nav_radio_choice']
 
 with st.sidebar:
-    st.markdown("### 🎛️ 终端功能控制台")
-    
+    st.markdown("### 🎛️ 终端控制台")
     current_idx = NAV_OPTIONS.index(st.session_state['current_page']) if st.session_state['current_page'] in NAV_OPTIONS else 0
     
     st.radio(
@@ -560,11 +549,10 @@ with st.sidebar:
     )
 
     st.markdown("---")
-    # 使用 Form 打包风控参数，解决参数输入失焦事件冲突
     with st.form(key="global_setting_form"):
-        st.markdown("#### ⚙️ 策略风控设置")
-        new_rr = st.slider("目标盈亏比 (Risk-Reward)", 1.0, 4.0, float(st.session_state['rr_ratio']), 0.5)
-        form_submitted = st.form_submit_button("应用风控配置", use_container_width=True)
+        st.markdown("#### ⚙️ 策略风控")
+        new_rr = st.slider("目标盈亏比", 1.0, 4.0, float(st.session_state['rr_ratio']), 0.5)
+        form_submitted = st.form_submit_button("保存配置", use_container_width=True)
         if form_submitted:
             st.session_state['rr_ratio'] = new_rr
             st.rerun()
@@ -574,25 +562,25 @@ rr_ratio = st.session_state['rr_ratio']
 
 # --- 模式 1: 自动化全市场扫描推荐 ---
 if app_mode == "🚀 自动扫描 & 智能推荐":
-    st.markdown("### 🛰️ 量化自动扫描与多维强推荐榜单")
-    st.caption("选择预设板块或自定义池：系统自动整合 **趋势强度 + 贴合买点 + 动能量能 + 资讯情绪** 综合打分。")
+    st.markdown("### 🛰️ 量化自动扫描与推荐")
 
     c_preset, c_custom, c_btn = st.columns([2.5, 3.5, 1.5])
     
     with c_preset:
-        selected_preset = st.selectbox("📦 选择预设行业/指数池", list(INDEX_PRESET_POOLS.keys()))
+        selected_preset = st.selectbox("📦 选择扫描预设池", list(INDEX_PRESET_POOLS.keys()))
 
+    # 优化4：懒加载逻辑，在需要标普500数据时才去调用，避免首页加载超时
     if INDEX_PRESET_POOLS[selected_preset] == "SP500_AUTO":
         default_pool_list = fetch_sp500_tickers()
     else:
         default_pool_list = INDEX_PRESET_POOLS[selected_preset]
 
     with c_custom:
-        custom_pool_str = st.text_input("待扫描代码清单 (可增删修改)", value=", ".join(default_pool_list))
+        custom_pool_str = st.text_input("待扫描代码 (逗号分隔)", value=", ".join(default_pool_list))
 
     with c_btn:
         st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
-        run_scan = st.button("⚡ 启动全量扫描", use_container_width=True)
+        run_scan = st.button("⚡ 启动扫描", use_container_width=True)
 
     symbols_to_scan = [s.strip().upper() for s in custom_pool_str.split(",") if s.strip()]
 
@@ -613,33 +601,30 @@ if app_mode == "🚀 自动扫描 & 智能推荐":
         results = st.session_state.get('scan_results', [])
 
         if results:
-            st.markdown("#### 🔥 今日量化得分最高 Top 3 推荐标的")
+            st.markdown("#### 🔥 得分 Top 3 推荐标的")
             top_cols = st.columns(min(3, len(results)))
             for i, col in enumerate(top_cols):
                 res = results[i]
                 with col:
                     st.markdown(f"""
                     <div class="tech-card">
-                        <div style="font-size:11px; color:#00f0ff; font-weight:700;">TOP {i+1} RANKING</div>
-                        <div style="font-size:20px; font-weight:700; color:#ffffff;">{res['symbol']} <span style="font-size:12px; color:#8b949e;">{res['name']}</span></div>
-                        <div style="margin-top:6px;">
-                            <span style="font-size:18px; font-weight:700; color:#ccff00;">综合得分: {res['quant_score']} / 100</span>
-                        </div>
-                        <div style="font-size:12px; margin-top:4px; color:#00ff66;">{res['recommendation']}</div>
-                        <hr style="border-color:#30363d; margin:8px 0;">
+                        <div style="font-size:10px; color:#00f0ff; font-weight:700;">TOP {i+1}</div>
+                        <div style="font-size:18px; font-weight:700; color:#ffffff;">{res['symbol']}</div>
+                        <div style="font-size:16px; font-weight:700; color:#ccff00; margin-top:4px;">得分: {res['quant_score']}</div>
+                        <div style="font-size:11px; color:#00ff66;">{res['recommendation']}</div>
+                        <hr style="border-color:#30363d; margin:6px 0;">
                         <div style="font-size:11px; color:#8b949e;">现价: <b>${res['current_price']}</b></div>
                         <div style="font-size:11px; color:#ccff00;">⚡ 贴合买点: <b>${res['near_market_buy']}</b></div>
-                        <div style="font-size:11px; color:#00ff66;">🎯 理想买点: <b>${res['ideal_buy_price']}</b></div>
                     </div>
                     """, unsafe_allow_html=True)
                     
-                    if st.button(f"🔍 查看 {res['symbol']} 诊断图表", key=f"btn_top_{res['symbol']}"):
+                    if st.button(f"🔍 诊断 {res['symbol']}", key=f"btn_top_{res['symbol']}"):
                         st.session_state['selected_ticker'] = res['symbol']
                         st.session_state['current_page'] = "🔍 单标的全量诊断"
                         st.rerun()
 
             st.markdown("---")
-            st.markdown("#### 📊 全扫描池量化打分矩阵总表")
+            st.markdown("#### 📊 全量矩阵总表")
             table_rows = []
             for r in results:
                 table_rows.append({
@@ -647,27 +632,25 @@ if app_mode == "🚀 自动扫描 & 智能推荐":
                     "综合得分": r['quant_score'],
                     "推荐评级": r['recommendation'],
                     "现价 ($)": r['current_price'],
-                    "⚡ 贴合现价买点 ($)": r['near_market_buy'],
-                    "🎯 理想回调买点 ($)": r['ideal_buy_price'],
+                    "⚡ 贴合买点 ($)": r['near_market_buy'],
+                    "🎯 理想买点 ($)": r['ideal_buy_price'],
                     "🛡️ 止损位 ($)": r['stop_loss'],
                     "🎉 止盈位 ($)": r['take_profit'],
-                    "趋势状态": r['trend_label'],
-                    "RSI": r['rsi'],
-                    "MACD": r['macd_status']
+                    "RSI": r['rsi']
                 })
             st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
 
 # --- 模式 2: 单标的精细化诊断 ---
 elif app_mode == "🔍 单标的全量诊断":
-    st.markdown("### 🔍 标的精细量化算价与图表诊断")
+    st.markdown("### 🔍 标的量化诊断")
     
     with st.form(key="symbol_search_form"):
-        c_in, c_b = st.columns([4, 1])
+        c_in, c_b = st.columns([3, 1])
         with c_in:
-            target_symbol = st.text_input("输入股票代码 (Ticker)", value=st.session_state.get('selected_ticker', 'NVDA')).upper().strip()
+            target_symbol = st.text_input("股票代码", value=st.session_state.get('selected_ticker', 'NVDA')).upper().strip()
         with c_b:
             st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
-            search_submitted = st.form_submit_button("⚡ 诊断标的", use_container_width=True)
+            search_submitted = st.form_submit_button("⚡ 诊断", use_container_width=True)
             if search_submitted:
                 st.session_state['selected_ticker'] = target_symbol
 
@@ -675,16 +658,15 @@ elif app_mode == "🔍 单标的全量诊断":
     if target_symbol:
         sig = fetch_advanced_quant_signals(target_symbol, risk_reward_ratio=rr_ratio)
         if sig:
-            st.markdown(f"### 🎯 标的: **{sig['symbol']}** ({sig['name']}) | 量化得分: `{sig['quant_score']}分` (`{sig['recommendation']}`)")
+            st.markdown(f"**{sig['symbol']}** ({sig['name']}) | 得分: `{sig['quant_score']}分` (`{sig['recommendation']}`)")
 
-            k1, k2, k3, k4, k5, k6 = st.columns(6)
+            k1, k2, k3, k4 = st.columns(4)
             with k1:
                 color_str = "#00ff66" if sig['change_pct'] >= 0 else "#ff3366"
                 st.markdown(f"""
                 <div class="tech-card">
                     <div class="metric-title">当前价格</div>
-                    <div style="font-size:18px; font-weight:700; color:{color_str};">${sig['current_price']}</div>
-                    <div style="font-size:11px; color:{color_str};">{sig['change_pct']}%</div>
+                    <div style="font-size:16px; font-weight:700; color:{color_str};">${sig['current_price']}</div>
                 </div>""", unsafe_allow_html=True)
 
             with k2:
@@ -692,156 +674,96 @@ elif app_mode == "🔍 单标的全量诊断":
                 <div class="tech-card">
                     <div class="metric-title">⚡ 贴合现价买点</div>
                     <div class="metric-value-nearbuy">${sig['near_market_buy']}</div>
-                    <div style="font-size:10px; color:#8b949e;">EMA10/VWAP支撑</div>
                 </div>""", unsafe_allow_html=True)
 
             with k3:
                 st.markdown(f"""
                 <div class="tech-card">
-                    <div class="metric-title">🎯 理想回调买点</div>
-                    <div class="metric-value-buy">${sig['ideal_buy_price']}</div>
-                    <div style="font-size:10px; color:#8b949e;">布林下轨/MA50</div>
+                    <div class="metric-title">🛡️ 动态止损线</div>
+                    <div class="metric-value-stop">${sig['stop_loss']}</div>
                 </div>""", unsafe_allow_html=True)
 
             with k4:
                 st.markdown(f"""
                 <div class="tech-card">
-                    <div class="metric-title">🛡️ 动态止损线</div>
-                    <div class="metric-value-stop">${sig['stop_loss']}</div>
-                    <div style="font-size:10px; color:#8b949e;">2x ATR 动态保护</div>
-                </div>""", unsafe_allow_html=True)
-
-            with k5:
-                st.markdown(f"""
-                <div class="tech-card">
                     <div class="metric-title">🎉 目标止盈线</div>
                     <div class="metric-value-take">${sig['take_profit']}</div>
-                    <div style="font-size:10px; color:#8b949e;">盈亏比 1:{rr_ratio}</div>
                 </div>""", unsafe_allow_html=True)
 
-            with k6:
-                st.markdown(f"""
-                <div class="tech-card">
-                    <div class="metric-title">📊 动态 RSI (14)</div>
-                    <div style="font-size:18px; font-weight:700; color:#00f0ff;">{sig['rsi']}</div>
-                    <div style="font-size:10px; color:#8b949e;">相对强弱指标</div>
-                </div>""", unsafe_allow_html=True)
+            st.plotly_chart(render_professional_chart(sig), use_container_width=True, config={'displayModeBar': False})
 
-            c_chart, c_right = st.columns([2.6, 1.2])
-            with c_chart:
-                st.plotly_chart(render_professional_chart(sig), use_container_width=True)
+            st.markdown("#### 🤖 量化指标状态")
+            st.write(f"- **趋势**: `{sig['trend_label']}` | **RSI**: `{sig['rsi']}` | **MACD**: `{sig['macd_status']}`")
 
-            with c_right:
-                st.markdown("#### 🤖 多维度量化状态")
-                st.write(f"- **综合推选评分**: `{sig['quant_score']} / 100`")
-                st.write(f"- **趋势定性**: `{sig['trend_label']}`")
-                st.write(f"- **Supertrend**: `{sig['supertrend_signal']}`")
-                st.write(f"- **MACD 状态**: `{sig['macd_status']}`")
-                st.write(f"- **VWAP (机构成本)**: `${sig['vwap']}`")
-                st.write(f"- **EMA10 (快线)**: `${sig['ema10']}`")
-                
-                st.markdown("---")
-                st.markdown("#### 📰 实时资讯与新闻")
-                if sig['news']:
-                    for n in sig['news']:
-                        st.markdown(f"""
-                        <div class="news-card">
-                            <a href="{n['link']}" target="_blank" style="color:#c9d1d9; text-decoration:none; font-weight:600; font-size:11px;">{n['title']}</a>
-                            <div style="font-size:9px; color:#8b949e; margin-top:3px;">{n['publisher']} | {n['providerPublishTime']}</div>
-                        </div>
-                        """, unsafe_allow_html=True)
-                else:
-                    st.caption("暂无实时关联新闻。")
-
-                st.markdown("---")
-                if st.button(f"➕ 加入自选清单", use_container_width=True):
-                    add_to_watchlist(sig['symbol'], sig['name'], "推荐自选")
-                    st.success("已成功保存！")
+            if st.button(f"➕ 加入自选清单", use_container_width=True):
+                add_to_watchlist(sig['symbol'], sig['name'], "推荐自选")
+                st.success("已成功保存！")
 
 # --- 模式 3: 策略历史回测引擎 UI ---
 elif app_mode == "🧪 策略历史回测引擎":
-    st.markdown("### 🧪 策略历史回测与绩效分析 (Backtest Engine)")
-    st.caption("验证规则：基于贴合买点与移动追踪止损策略，对过去 2 年历史行情进行全量模拟机械交易。")
+    st.markdown("### 🧪 策略历史回测 (Backtest Engine)")
 
     with st.form(key="backtest_form"):
         c_bt_sym, c_bt_cap, c_bt_btn = st.columns([2, 2, 1.5])
         with c_bt_sym:
-            bt_symbol = st.text_input("回测股票代码", value=st.session_state.get('selected_ticker', 'NVDA')).upper().strip()
+            bt_symbol = st.text_input("回测代码", value=st.session_state.get('selected_ticker', 'NVDA')).upper().strip()
         with c_bt_cap:
             init_capital = st.number_input("初始资金 ($)", value=10000, step=1000)
         with c_bt_btn:
             st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
-            run_bt = st.form_submit_button("🚀 启动回测", use_container_width=True)
+            run_bt = st.form_submit_button("🚀 回测", use_container_width=True)
 
     if run_bt or 'bt_metrics' in st.session_state:
         if run_bt:
-            with st.spinner("正在抓取历史数据计算回测绩效..."):
-                metrics, equity_df = run_backtest_engine(bt_symbol, initial_capital=float(init_capital), risk_reward_ratio=rr_ratio)
-                st.session_state['bt_metrics'] = metrics
-                st.session_state['bt_equity'] = equity_df
+            metrics, equity_df = run_backtest_engine(bt_symbol, initial_capital=float(init_capital), risk_reward_ratio=rr_ratio)
+            st.session_state['bt_metrics'] = metrics
+            st.session_state['bt_equity'] = equity_df
 
         metrics = st.session_state.get('bt_metrics')
         equity_df = st.session_state.get('bt_equity')
 
         if metrics and equity_df is not None:
-            m1, m2, m3, m4, m5 = st.columns(5)
+            m1, m2, m3, m4 = st.columns(4)
             with m1:
                 st.markdown(f"""
                 <div class="tech-card">
-                    <div class="metric-title">初始资金</div>
-                    <div style="font-size:18px; font-weight:700; color:#ffffff;">${metrics['initial_capital']:,.2f}</div>
+                    <div class="metric-title">累计总收益率</div>
+                    <div style="font-size:16px; font-weight:700; color:#00ff66;">{metrics['total_return']}%</div>
                 </div>""", unsafe_allow_html=True)
             with m2:
-                ret_color = "#00ff66" if metrics['total_return'] >= 0 else "#ff3366"
                 st.markdown(f"""
                 <div class="tech-card">
-                    <div class="metric-title">累计总收益率</div>
-                    <div style="font-size:18px; font-weight:700; color:{ret_color};">{metrics['total_return']}%</div>
-                    <div style="font-size:10px; color:{ret_color};">最终资产: ${metrics['final_capital']:,.2f}</div>
+                    <div class="metric-title">策略胜率</div>
+                    <div style="font-size:16px; font-weight:700; color:#00f0ff;">{metrics['win_rate']}%</div>
                 </div>""", unsafe_allow_html=True)
             with m3:
                 st.markdown(f"""
                 <div class="tech-card">
-                    <div class="metric-title">策略胜率</div>
-                    <div style="font-size:18px; font-weight:700; color:#00f0ff;">{metrics['win_rate']}%</div>
-                    <div style="font-size:10px; color:#8b949e;">总交易次数: {metrics['total_trades']} 次</div>
+                    <div class="metric-title">历史最大回撤</div>
+                    <div style="font-size:16px; font-weight:700; color:#ff3366;">{metrics['max_drawdown']}%</div>
                 </div>""", unsafe_allow_html=True)
             with m4:
                 st.markdown(f"""
                 <div class="tech-card">
-                    <div class="metric-title">历史最大回撤</div>
-                    <div style="font-size:18px; font-weight:700; color:#ff3366;">{metrics['max_drawdown']}%</div>
-                    <div style="font-size:10px; color:#8b949e;">风控安全阀</div>
-                </div>""", unsafe_allow_html=True)
-            with m5:
-                st.markdown(f"""
-                <div class="tech-card">
-                    <div class="metric-title">盈亏比设定</div>
-                    <div style="font-size:18px; font-weight:700; color:#ccff00;">1 : {rr_ratio}</div>
-                    <div style="font-size:10px; color:#8b949e;">动态 ATR 追踪</div>
+                    <div class="metric-title">最终资产</div>
+                    <div style="font-size:16px; font-weight:700; color:#ccff00;">${metrics['final_capital']:,.2f}</div>
                 </div>""", unsafe_allow_html=True)
 
             fig_equity = go.Figure()
-            fig_equity.add_trace(go.Scatter(
-                x=equity_df['Date'], y=equity_df['Capital'], 
-                mode='lines', line=dict(color='#00f0ff', width=2),
-                name='账户总资产'
-            ))
+            fig_equity.add_trace(go.Scatter(x=equity_df['Date'], y=equity_df['Capital'], mode='lines', line=dict(color='#00f0ff', width=2)))
             fig_equity.update_layout(
-                title=f"📈 {bt_symbol} 策略资产净值曲线 (Equity Curve)",
+                title=f"📈 {bt_symbol} 资产净值曲线",
                 template="plotly_dark", paper_bgcolor='#0b0e14', plot_bgcolor='#161b22',
-                height=450, margin=dict(l=15, r=15, t=40, b=15)
+                height=350, margin=dict(l=10, r=10, t=35, b=10)
             )
-            st.plotly_chart(fig_equity, use_container_width=True)
-        else:
-            st.error("数据不足或无法完成回测，请换个股票代码重试。")
+            st.plotly_chart(fig_equity, use_container_width=True, config={'displayModeBar': False})
 
 # --- 模式 4: 持仓自选清单监控 ---
 elif app_mode == "📊 自选清单监控":
-    st.markdown("### 📋 本地自选清单量化矩阵")
+    st.markdown("### 📋 自选清单")
     df_w = get_watchlist()
     if df_w.empty:
-        st.info("清单为空，请在上方模式中添加自选标的。")
+        st.info("清单为空。")
     else:
         res = []
         for _, r in df_w.iterrows():
@@ -853,11 +775,8 @@ elif app_mode == "📊 自选清单监控":
                     "评级": s['recommendation'],
                     "现价 ($)": s['current_price'],
                     "⚡ 贴合买点 ($)": s['near_market_buy'],
-                    "🎯 理想买点 ($)": s['ideal_buy_price'],
-                    "🛡️ 止损位 ($)": s['stop_loss'],
-                    "🎉 止盈位 ($)": s['take_profit'],
-                    "趋势状态": s['trend_label'],
-                    "MACD": s['macd_status']
+                    "🛡️ 止损 ($)": s['stop_loss'],
+                    "🎉 止盈 ($)": s['take_profit']
                 })
         if res:
             st.dataframe(pd.DataFrame(res), use_container_width=True, hide_index=True)
