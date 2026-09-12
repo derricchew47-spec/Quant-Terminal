@@ -3,8 +3,9 @@
 # ============================================================================
 # 架构融合亮点：
 # 1) 主框架 (UI): 采用 Quantum 1 视效、卡片 Dashboard、自选库管理与多 Tab 布局。
-# 2) 回测与指标 (Engine): 采用新版严谨的时间顺序撮合 (No Lookahead Bias) & Wilder 平滑算法。
-# 3) 适应性逻辑 (Algorithm Reform): 
+# 2) 布局修复: 隐藏 Streamlit 原生 Header，调整 padding-top，修复标题遮挡问题。
+# 3) 防护修补: 修复 p['buy_mode'] 的 KeyError 异常。
+# 4) 牛熊自适应逻辑: 
 #    - 大牛市: 自动切换 Super-Bull 突破/追涨买点 (EMA10 / 5日突破)，避免踏空。
 #    - 大熊市: 引入 SPY 200日趋势拦截 + MA50/200 熊市死叉拦截，防止连续频发买入/止损。
 # ============================================================================
@@ -23,10 +24,10 @@ from plotly.subplots import make_subplots
 import streamlit as st
 import yfinance as yf
 
-VERSION = "ULTRA_4.0_BULL_BEAR_ADAPTIVE"
+VERSION = "ULTRA_4.1_STABLE"
 
 # -----------------------------------------------------------------------------
-# 1. 页面配置与 Cyberpunk 视觉样式 (来源于 Quantum 1 / UI 主框架)
+# 1. 页面配置与 Cyberpunk 视觉样式 (修复标题遮挡问题)
 # -----------------------------------------------------------------------------
 st.set_page_config(
     page_title="QuantumSignal Terminal ULTRA",
@@ -38,17 +39,30 @@ st.set_page_config(
 st.markdown(
     """
 <style>
+    /* 隐藏顶部原生 Header 遮罩，防止挡住顶部文字 */
+    header[data-testid="stHeader"] { 
+        visibility: hidden; 
+        height: 0px; 
+    }
+    
     .stApp {
         background-color: #0b0e14;
         color: #c9d1d9;
         font-family: 'Fira Code', monospace, -apple-system, BlinkMacSystemFont, sans-serif;
     }
-    .block-container { max-width: 1450px; padding-top: 1.2rem; }
+    
+    /* 调整顶部 Padding 为 3.5rem，保证 Scroll 到最上方时标题完好显示 */
+    .block-container { 
+        max-width: 1450px; 
+        padding-top: 3.5rem !important; 
+    }
+    
     .tech-header {
         font-weight: 800;
         color: #00f0ff;
         text-shadow: 0 0 12px rgba(0,240,255,.35);
         letter-spacing: .5px;
+        margin-top: 0px;
         margin-bottom: 4px;
     }
     .tech-subtitle {
@@ -410,7 +424,7 @@ def indicators(frame, benchmark=None):
 
 
 # -----------------------------------------------------------------------------
-# 8. 重构逻辑：牛熊自适应交易计划 (Bull/Bear Adaptive Engine)
+# 8. 重构逻辑：牛熊自适应交易计划 (彻底杜绝 KeyError: buy_mode)
 # -----------------------------------------------------------------------------
 def plan(row, cfg=None):
     cfg = cfg or Config()
@@ -459,6 +473,7 @@ def plan(row, cfg=None):
         reasons.append("RSI过热")
 
     entry_low = max(stop + 0.1 * risk, entry - 0.25 * row.ATR)
+    
     return {
         "entry": entry,
         "stop": stop,
@@ -468,7 +483,7 @@ def plan(row, cfg=None):
         "eligible": len(reasons) == 0,
         "reasons": reasons,
         "score": int(row.Score),
-        "buy_mode": buy_mode,
+        "buy_mode": buy_mode,  # 确保必选字段完整返回
         "is_bear": is_bear_market,
     }
 
@@ -501,7 +516,7 @@ def build_summary(symbol, d, cfg):
         "目标": p["target"],
         "RSI": float(row.RSI),
         "ATR%": float(row.ATRpct),
-        "买入模式": p["buy_mode"],
+        "买入模式": p.get("buy_mode", "⚡ 动态量化"),
         "行情日期": d.index[-1].strftime("%Y-%m-%d"),
         "原因": "；".join(p["reasons"]) or "满足全部适应性筛选条件",
         "TrendScore": int(row.TrendScore),
@@ -579,7 +594,7 @@ def simulate(d, cfg=None, initial=10000.0, start=None):
                     target = entry + cfg.rr * (entry - stop)
                     basis = pos * entry * (1 + fee)
                     cash -= basis
-                    trades.append({"日期": date, "操作": "买入", "原因": p["buy_mode"], "价格": entry, "净盈亏": None})
+                    trades.append({"日期": date, "操作": "买入", "原因": p.get("buy_mode", "入场挂单"), "价格": entry, "净盈亏": None})
 
         # 移动止损 (次日生效)
         if pos > 0:
@@ -615,7 +630,7 @@ def simulate(d, cfg=None, initial=10000.0, start=None):
 
 
 # -----------------------------------------------------------------------------
-# 10. UI 渲染辅助函数 (来源于 Quantum 1 卡片与 Dashboard 布局)
+# 10. UI 渲染辅助函数 (Quantum 1 卡片与 Dashboard 布局)
 # -----------------------------------------------------------------------------
 def metric_card(title, value, css_class=""):
     return f"<div class='tech-card'><div class='metric-title'>{html.escape(title)}</div><div class='metric-value {css_class}'>{html.escape(str(value))}</div></div>"
@@ -661,7 +676,7 @@ with st.sidebar:
 cfg = cfg_from_session()
 
 # =============================================================================
-# TAB 1: 自动扫描 & 智能推荐 (Quantum 2 全池扫描 + 熊市拦截)
+# TAB 1: 自动扫描 & 智能推荐 (添加安全获取防护)
 # =============================================================================
 if app_mode == "🚀 自动扫描 & 智能推荐":
     st.markdown("### 🛰️ 市场全池自动扫描与牛熊识别")
@@ -701,29 +716,39 @@ if app_mode == "🚀 自动扫描 & 智能推荐":
         eligible_res = [r for r in res if r["eligible"]]
         st.markdown(f"<div class='signal-strip'><b>扫描完成</b> · 共 {len(res)} 只 · 达标候选 {len(eligible_res)} 只</div>", unsafe_allow_html=True)
         
-        # 顶部 3 大卡片
+        # 顶部 3 大卡片 (添加安全获取防护)
         top3 = eligible_res[:3] if eligible_res else res[:3]
         cols = st.columns(len(top3))
         for i, r in enumerate(top3):
-            p = r["plan"]
+            p = r.get("plan", {})
+            buy_mode_str = p.get("buy_mode", "⚡ 动态量化") if p else "未触发"
+            entry_val = p.get("entry", 0.0) if p else 0.0
+            stop_val = p.get("stop", 0.0) if p else 0.0
+            
             with cols[i]:
                 st.markdown(
                     f"""<div class='tech-card'>
                     <div style='color:#00f0ff;font-weight:800;font-size:11px'>TOP {i+1} · {r['symbol']}</div>
                     <div style='font-size:22px;font-weight:800;color:#fff'>${r['current_price']:.2f}</div>
-                    <div style='font-size:12px;color:#ccff00'>模式: {p['buy_mode']}</div>
+                    <div style='font-size:12px;color:#ccff00'>模式: {html.escape(buy_mode_str)}</div>
                     <hr style='border-color:#30363d;margin:6px 0'>
-                    <div style='font-size:11px;color:#8b949e'>买入参考: <b style='color:#ccff00'>${p['entry']:.2f}</b></div>
-                    <div style='font-size:11px;color:#8b949e'>止损位置: <b style='color:#ff3366'>${p['stop']:.2f}</b></div>
+                    <div style='font-size:11px;color:#8b949e'>买入参考: <b style='color:#ccff00'>${entry_val:.2f}</b></div>
+                    <div style='font-size:11px;color:#8b949e'>止损位置: <b style='color:#ff3366'>${stop_val:.2f}</b></div>
                     </div>""",
                     unsafe_allow_html=True,
                 )
 
         # 全量结果表格
         df_display = pd.DataFrame([{
-            "代码": r["symbol"], "评分": r["quant_score"], "状态": r["summary"]["状态"], 
-            "买入模式": r["plan"]["buy_mode"], "现价": r["current_price"], "买入参考": r["plan"]["entry"], 
-            "止损": r["plan"]["stop"], "目标": r["plan"]["target"], "原因": r["summary"]["原因"]
+            "代码": r["symbol"], 
+            "评分": r["quant_score"], 
+            "状态": r["summary"]["状态"], 
+            "买入模式": r.get("plan", {}).get("buy_mode", "⚡ 动态量化"), 
+            "现价": r["current_price"], 
+            "买入参考": r.get("plan", {}).get("entry", 0.0), 
+            "止损": r.get("plan", {}).get("stop", 0.0), 
+            "目标": r.get("plan", {}).get("target", 0.0), 
+            "原因": r["summary"]["原因"]
         } for r in res])
         st.dataframe(df_display, use_container_width=True, hide_index=True)
 
@@ -751,7 +776,6 @@ elif app_mode == "🔍 单标的全量诊断":
         p = sig["plan"]
         s = sig["summary"]
 
-        # 卡片 Dashboard (四核心指标)
         html_cards = (
             metric_card("现价", f"${sig['current_price']:.2f}")
             + metric_card("自适应买入参考", f"${p['entry']:.2f}", "metric-buy")
@@ -762,7 +786,7 @@ elif app_mode == "🔍 单标的全量诊断":
 
         st.markdown(
             f"""<div class='decision-box'>
-            <b>💡 运行策略: {p['buy_mode']}</b><br>
+            <b>💡 运行策略: {p.get('buy_mode', '⚡ 动态量化')}</b><br>
             <span style='font-size:11px;color:#8b949e;'>
             综合评分: <b style='color:#fff'>{sig['quant_score']} / 100</b> · 
             RSI: <b style='color:#fff'>{sig['rsi']:.1f}</b> · 
@@ -806,7 +830,6 @@ elif app_mode == "🧪 策略历史回测引擎":
             )
             st.markdown(f"<div style='display:grid;grid-template-columns:repeat(4,1fr);gap:10px'>{html_bt_cards}</div>", unsafe_allow_html=True)
 
-            # 净值曲线图
             fig_eq = go.Figure()
             fig_eq.add_trace(go.Scatter(x=eq.index, y=eq.Equity, name="Quantum 策略", line=dict(color="#00f0ff", width=2)))
             fig_eq.add_trace(go.Scatter(x=eq.index, y=eq.Benchmark, name="标的买入持有", line=dict(color="#6e7681", width=1.5, dash="dot")))
@@ -838,9 +861,14 @@ else:
         
         if watch_results:
             df_w = pd.DataFrame([{
-                "代码": r["symbol"], "评分": r["quant_score"], "状态": r["summary"]["状态"],
-                "买入模式": r["plan"]["buy_mode"], "现价": r["current_price"], "买入参考": r["plan"]["entry"],
-                "止损": r["plan"]["stop"], "目标": r["plan"]["target"]
+                "代码": r["symbol"], 
+                "评分": r["quant_score"], 
+                "状态": r["summary"]["状态"],
+                "买入模式": r.get("plan", {}).get("buy_mode", "⚡ 动态量化"), 
+                "现价": r["current_price"], 
+                "买入参考": r.get("plan", {}).get("entry", 0.0),
+                "止损": r.get("plan", {}).get("stop", 0.0), 
+                "目标": r.get("plan", {}).get("target", 0.0)
             } for r in watch_results])
             st.dataframe(df_w, use_container_width=True, hide_index=True)
         
