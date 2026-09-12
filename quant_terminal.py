@@ -389,16 +389,19 @@ def fetch_advanced_quant_signals(symbol: str, risk_reward_ratio: float = 2.0, pe
 # -----------------------------------------------------------------------------
 # 5. 历史回测引擎 (Backtest Engine)
 # -----------------------------------------------------------------------------
-def run_backtest_engine(symbol: str, initial_capital: float = 10000.0, risk_reward_ratio: float = 2.0, period: str = "2y"):
+def run_backtest_engine(symbol: str, initial_capital: float = 10000.0, risk_reward_ratio: float = 2.5, period: str = "2y"):
     ticker = yf.Ticker(symbol.upper().strip())
     df = ticker.history(period=period)
     if df.empty or len(df) < 50:
         return None, None
 
+    # 计算技术指标
     df['MA20'] = df['Close'].rolling(window=20).mean()
     df['MA50'] = df['Close'].rolling(window=50).mean()
+    df['EMA5'] = df['Close'].ewm(span=5, adjust=False).mean()
     df['EMA10'] = df['Close'].ewm(span=10, adjust=False).mean()
     
+    # 计算 ATR
     df['High-Low'] = df['High'] - df['Low']
     df['High-Close'] = np.abs(df['High'] - df['Close'].shift(1))
     df['Low-Close'] = np.abs(df['Low'] - df['Close'].shift(1))
@@ -409,7 +412,7 @@ def run_backtest_engine(symbol: str, initial_capital: float = 10000.0, risk_rewa
     position = 0.0
     entry_price = 0.0
     stop_loss = 0.0
-    take_profit = 0.0
+    highest_price_after_entry = 0.0
     trades = []
     equity_curve = []
 
@@ -421,32 +424,55 @@ def run_backtest_engine(symbol: str, initial_capital: float = 10000.0, risk_rewa
         atr = df['ATR'].iloc[i]
         ma20 = df['MA20'].iloc[i]
         ma50 = df['MA50'].iloc[i]
+        ema5 = df['EMA5'].iloc[i]
 
+        # --- 持仓逻辑 (追踪止损 & 利润奔跑) ---
         if position > 0:
-            if low <= stop_loss:
-                sell_price = stop_loss
+            # 更新买入后的最高价
+            highest_price_after_entry = max(highest_price_after_entry, high)
+            
+            # 动态移动止损线 (以最高价回撤 2 倍 ATR 或跌破 MA20 止损)
+            trailing_stop = highest_price_after_entry - (2.0 * atr)
+            stop_loss = max(stop_loss, trailing_stop)
+
+            # 触发止损或跌破 20 日线离场
+            if low <= stop_loss or price < ma20:
+                sell_price = min(price, stop_loss) if low <= stop_loss else price
                 revenue = position * sell_price
                 profit = revenue - (position * entry_price)
                 capital += revenue
-                trades.append({"date": current_date, "type": "SELL (止损)", "price": round(sell_price, 2), "profit": round(profit, 2), "capital": round(capital, 2)})
-                position = 0.0
-            elif high >= take_profit:
-                sell_price = take_profit
-                revenue = position * sell_price
-                profit = revenue - (position * entry_price)
-                capital += revenue
-                trades.append({"date": current_date, "type": "SELL (止盈)", "price": round(sell_price, 2), "profit": round(profit, 2), "capital": round(capital, 2)})
+                trades.append({
+                    "date": current_date, 
+                    "type": "SELL (移动止损/趋势离场)", 
+                    "price": round(sell_price, 2), 
+                    "profit": round(profit, 2), 
+                    "capital": round(capital, 2)
+                })
                 position = 0.0
 
+        # --- 开仓逻辑 (宽松多头 + 双重触发机制) ---
         if position == 0:
             is_uptrend = price > ma20 and ma20 > ma50
-            if is_uptrend and price <= df['EMA10'].iloc[i] * 1.005:
+            # 条件A: 回调到 EMA5/EMA10 支撑线附近
+            is_dip_buy = (price <= ema5 * 1.01)
+            # 条件B: 突破近 20 日高点 (追涨突破)
+            is_breakout = (price >= df['High'].iloc[i-20:i].max())
+
+            if is_uptrend and (is_dip_buy or is_breakout):
                 entry_price = price
-                stop_loss = entry_price - (2 * atr)
-                take_profit = entry_price + (2 * atr * risk_reward_ratio)
+                highest_price_after_entry = high
+                # 初始止损线设为 1.8 * ATR
+                stop_loss = entry_price - (1.8 * atr)
+                
                 position = capital / entry_price
                 capital = 0.0
-                trades.append({"date": current_date, "type": "BUY", "price": round(entry_price, 2), "profit": 0.0, "capital": round(position * entry_price, 2)})
+                trades.append({
+                    "date": current_date, 
+                    "type": "BUY", 
+                    "price": round(entry_price, 2), 
+                    "profit": 0.0, 
+                    "capital": round(position * entry_price, 2)
+                })
 
         current_total = capital + (position * price)
         equity_curve.append({"Date": current_date, "Capital": current_total})
@@ -472,7 +498,6 @@ def run_backtest_engine(symbol: str, initial_capital: float = 10000.0, risk_rewa
         }
         return metrics, equity_df
     return None, None
-
 # -----------------------------------------------------------------------------
 # 6. 专业级三分栏画图引擎
 # -----------------------------------------------------------------------------
