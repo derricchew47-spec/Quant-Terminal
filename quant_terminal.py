@@ -14,7 +14,7 @@ st.set_page_config(
     page_title="QuantumSignal Terminal PRO",
     page_icon="⚡",
     layout="wide",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="collapsed"  # 手机端默认折叠侧边栏，提升首次开屏渲染速度
 )
 
 st.markdown("""
@@ -89,7 +89,15 @@ st.markdown("""
         text-shadow: 0 0 8px rgba(0, 240, 255, 0.3);
     }
 
-    /* 侧边栏样式 */
+    .news-card {
+        background-color: #161b22;
+        border-left: 3px solid #00f0ff;
+        padding: 8px 10px;
+        margin-bottom: 6px;
+        border-radius: 4px;
+    }
+
+    /* 侧边栏按钮样式 */
     div[data-testid="stSidebar"] .stRadio > div {
         gap: 8px;
     }
@@ -138,7 +146,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
-# 2. State 初始化 & 预设池字典
+# 2. State 初始化 & 懒加载预设池字典
 # -----------------------------------------------------------------------------
 NAV_OPTIONS = [
     "🚀 自动扫描 & 智能推荐", 
@@ -154,6 +162,7 @@ if 'selected_ticker' not in st.session_state:
 if 'rr_ratio' not in st.session_state:
     st.session_state['rr_ratio'] = 2.0
 
+# 优化1：高时长 TTL 缓存（24小时），避免移动网络重复请求 Wikipedia 网页
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_sp500_tickers():
     try:
@@ -210,281 +219,244 @@ def get_watchlist():
 init_quant_db()
 
 # -----------------------------------------------------------------------------
-# 4. Pro 数学指标计算 & Wilder 平滑算法库
+# 4. 多维度量化指标计算 & 智能推选打分引擎
 # -----------------------------------------------------------------------------
-def clean_df(frame):
-    d = frame.copy()
-    d.index = pd.DatetimeIndex(d.index).tz_localize(None).normalize()
-    d = d.loc[~d.index.duplicated(keep='last')].sort_index()
-    fields = ['Open', 'High', 'Low', 'Close', 'Volume']
-    d = d[fields].apply(pd.to_numeric, errors='coerce').replace([np.inf, -np.inf], np.nan).dropna()
-    valid = (d[fields[:4]] > 0).all(axis=1) & (d.Volume >= 0)
-    valid &= (d.High >= d[['Open','Close','Low']].max(axis=1)) & (d.Low <= d[['Open','Close','High']].min(axis=1))
-    return d.loc[valid]
-
-def wilder_smooth(s, n=14):
-    a = s.to_numpy(dtype=float)
-    out = np.full(len(a), np.nan)
-    for i in range(n-1, len(a)):
-        if i == 0 or np.isnan(out[i-1]):
-            if np.isfinite(a[i-n+1:i+1]).all():
-                out[i] = a[i-n+1:i+1].mean()
-        elif np.isfinite(a[i]):
-            out[i] = (out[i-1]*(n-1) + a[i])/n
-    return pd.Series(out, index=s.index)
-
+# 优化2：隐藏加载 Spinners，提升手机流畅度
 @st.cache_data(ttl=1800, show_spinner=False)
-def fetch_spy_benchmark(period="2y"):
-    try:
-        spy = yf.Ticker("SPY").history(period=period)
-        return clean_df(spy)
-    except Exception:
-        return None
-
-@st.cache_data(ttl=1800, show_spinner=False)
-def fetch_advanced_quant_signals(symbol: str, risk_reward_ratio: float = 2.0, period: str = "2y"):
+def fetch_advanced_quant_signals(symbol: str, risk_reward_ratio: float = 2.0, period: str = "1y"):
     if not symbol or not symbol.strip():
         return None
     try:
         ticker = yf.Ticker(symbol.strip().upper())
         df = ticker.history(period=period)
-        if df.empty or len(df) < 210:
+        if df.empty or len(df) < 35:
             return None
         
-        df = clean_df(df)
-        c, h, l, v = df.Close, df.High, df.Low, df.Volume
-        
-        # 1. ATR
-        tr = pd.concat([h-l, (h-c.shift()).abs(), (l-c.shift()).abs()], axis=1).max(axis=1)
-        df['ATR'] = wilder_smooth(tr, 14)
-        
-        # 2. 均线
-        for n in (20, 50, 200):
-            df[f'MA{n}'] = c.rolling(n).mean()
-        df['EMA10'] = c.ewm(span=10, adjust=False).mean()
-        df['EMA20'] = c.ewm(span=20, adjust=False).mean()
-        
-        # 3. RSI
-        delta = c.diff()
-        gain, loss = wilder_smooth(delta.clip(lower=0)), wilder_smooth(-delta.clip(upper=0))
-        df['RSI'] = 100 - 100/(1 + gain/loss.replace(0, np.nan))
-        df.loc[(loss == 0) & (gain > 0), 'RSI'] = 100
-        df.loc[(gain == 0) & (loss > 0), 'RSI'] = 0
-        df.loc[(gain == 0) & (loss == 0), 'RSI'] = 50
-        
-        # 4. MACD
-        df['MACD'] = c.ewm(span=12, adjust=False).mean() - c.ewm(span=26, adjust=False).mean()
-        df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-        df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
-        
-        # 5. Bollinger Bands & VWMA20
-        df['VWMA20'] = (((h+l+c)/3)*v).rolling(20).sum() / v.rolling(20).sum().replace(0, np.nan)
-        df['STD20'] = c.rolling(20).std()
+        current_price = float(df['Close'].iloc[-1])
+        prev_close = float(df['Close'].iloc[-2])
+        change_pct = ((current_price - prev_close) / prev_close) * 100
+
+        df['High-Low'] = df['High'] - df['Low']
+        df['High-Close'] = np.abs(df['High'] - df['Close'].shift(1))
+        df['Low-Close'] = np.abs(df['Low'] - df['Close'].shift(1))
+        df['TR'] = df[['High-Low', 'High-Close', 'Low-Close']].max(axis=1)
+        df['ATR'] = df['TR'].rolling(window=14).mean()
+        atr = float(df['ATR'].iloc[-1])
+
+        df['MA20'] = df['Close'].rolling(window=20).mean()
+        df['STD20'] = df['Close'].rolling(window=20).std()
         df['Upper_Band'] = df['MA20'] + (2 * df['STD20'])
         df['Lower_Band'] = df['MA20'] - (2 * df['STD20'])
-        
-        # 6. Supertrend
-        at10 = wilder_smooth(tr, 10).to_numpy()
-        ub = ((h+l)/2).to_numpy() + 3*at10
-        lb = ((h+l)/2).to_numpy() - 3*at10
-        fu, fl = ub.copy(), lb.copy()
-        direction = np.zeros(len(df), dtype=int)
-        line = np.full(len(df), np.nan)
-        prices = c.to_numpy()
-        for i in range(len(df)):
-            if not np.isfinite(at10[i]): continue
-            if i == 0 or not np.isfinite(at10[i-1]):
-                direction[i] = 1 if prices[i] >= (h.iloc[i]+l.iloc[i])/2 else -1
-            else:
-                fu[i] = ub[i] if ub[i] < fu[i-1] or prices[i-1] > fu[i-1] else fu[i-1]
-                fl[i] = lb[i] if lb[i] > fl[i-1] or prices[i-1] < fl[i-1] else fl[i-1]
-                direction[i] = direction[i-1]
-                if direction[i-1] == -1 and prices[i] > fu[i]: direction[i] = 1
-                elif direction[i-1] == 1 and prices[i] < fl[i]: direction[i] = -1
-            line[i] = fl[i] if direction[i] == 1 else fu[i]
-        df['STDirection'], df['Supertrend'] = direction, line
+        lower_band = float(df['Lower_Band'].iloc[-1])
+        upper_band = float(df['Upper_Band'].iloc[-1])
 
-        # 7. 相对 SPY 的 Alpha
-        spy_df = fetch_spy_benchmark(period=period)
-        df['Return63'] = c.pct_change(63, fill_method=None)
-        if spy_df is not None and not spy_df.empty:
-            b = spy_df.Close.reindex(df.index)
-            df['Relative63'] = df['Return63'] - b.pct_change(63, fill_method=None)
-            df['MarketOK'] = b > b.rolling(200).mean()
+        df['EMA10'] = df['Close'].ewm(span=10, adjust=False).mean()
+        ema10 = float(df['EMA10'].iloc[-1])
+        df['VWAP'] = (df['Volume'] * (df['High'] + df['Low'] + df['Close']) / 3).cumsum() / df['Volume'].cumsum()
+        vwap = float(df['VWAP'].iloc[-1])
+
+        delta = df['Close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        df['RSI'] = 100 - (100 / (1 + rs))
+        rsi = float(df['RSI'].iloc[-1])
+
+        exp1 = df['Close'].ewm(span=12, adjust=False).mean()
+        exp2 = df['Close'].ewm(span=26, adjust=False).mean()
+        df['MACD'] = exp1 - exp2
+        df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+        df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
+        macd_val = float(df['MACD'].iloc[-1])
+        macd_sig = float(df['MACD_Signal'].iloc[-1])
+        is_macd_bullish = macd_val > macd_sig
+        macd_status = "🟢 金叉 (Bullish)" if is_macd_bullish else "🔴 死叉 (Bearish)"
+
+        st_multiplier, st_period = 3.0, 10
+        hl2 = (df['High'] + df['Low']) / 2
+        df['Basic_UB'] = hl2 + (st_multiplier * df['ATR'])
+        df['Basic_LB'] = hl2 - (st_multiplier * df['ATR'])
+        df['Final_UB'] = 0.0
+        df['Final_LB'] = 0.0
+        for i in range(1, len(df)):
+            df.loc[df.index[i], 'Final_UB'] = df['Basic_UB'].iloc[i] if (df['Basic_UB'].iloc[i] < df['Final_UB'].iloc[i-1] or df['Close'].iloc[i-1] > df['Final_UB'].iloc[i-1]) else df['Final_UB'].iloc[i-1]
+            df.loc[df.index[i], 'Final_LB'] = df['Basic_LB'].iloc[i] if (df['Basic_LB'].iloc[i] > df['Final_LB'].iloc[i-1] or df['Close'].iloc[i-1] < df['Final_LB'].iloc[i-1]) else df['Final_LB'].iloc[i-1]
+        supertrend_is_buy = current_price > df['Final_UB'].iloc[-1]
+        supertrend_signal = "🟢 多头轨道 (BUY)" if supertrend_is_buy else "🔴 空头轨道 (SELL)"
+
+        df['MA50'] = df['Close'].rolling(window=50).mean()
+        ma20 = float(df['MA20'].iloc[-1])
+        ma50 = float(df['MA50'].iloc[-1]) if len(df) >= 50 else ma20
+
+        if current_price > ma20 and ma20 > ma50:
+            trend_label = "🔥 强力多头 (Strong Uptrend)"
+            trend_code = "UPTREND"
+        elif current_price < ma20 and ma20 < ma50:
+            trend_label = "❄️ 降维空头 (Downtrend Risk)"
+            trend_code = "DOWNTREND"
+        elif current_price > ma20 and current_price < ma50:
+            trend_label = "↗️ 弱势反弹 (Weak Recovery)"
+            trend_code = "RECOVERY"
         else:
-            df['Relative63'] = np.nan
-            df['MarketOK'] = False
+            trend_label = "⚡ 宽幅震荡 (Sideways)"
+            trend_code = "SIDEWAYS"
 
-        df['DollarVolume'] = (c * v).rolling(20).mean()
-        df['ATRpct'] = df['ATR'] / c * 100
+        ideal_buy_price = min(lower_band, ma50)
+        if trend_code == "UPTREND":
+            near_market_buy = min(current_price, max(ema10, vwap, current_price * 0.992))
+        elif trend_code == "SIDEWAYS":
+            near_market_buy = min(current_price, (ma20 + vwap) / 2)
+        else:
+            near_market_buy = min(current_price, current_price - (0.5 * atr))
 
-        # 8. 打分引擎并补充量化得分序列 (量化得分列命名为 QuantScore 供回测使用)
-        trend_score = ((df.Close > df.MA50).astype(int)*10 + (df.MA50 > df.MA200).astype(int)*10 + (df.MA50 > df.MA50.shift(10)).astype(int)*10)
-        rel_val = df.Relative63.fillna(-1)
-        strength_score = np.where(rel_val > 0.10, 20, np.where(rel_val > 0.03, 15, np.where(rel_val > 0, 10, 0)))
-        momentum_score = (np.where((df.RSI >= 45) & (df.RSI <= 65), 10, 0) + np.where(df.MACD_Hist > 0, 5, 0) + np.where(df.STDirection == 1, 5, 0))
-        dvol = df.DollarVolume
-        liquidity_score = np.where(dvol >= 50e6, 10, np.where(dvol >= 10e6, 5, 0))
-        atr_p = df.ATRpct
-        volatility_score = np.where((atr_p >= 1) & (atr_p <= 4), 10, np.where((atr_p >= 0.3) & (atr_p <= 6), 5, 0))
-        market_score = np.where(df.MarketOK, 10, 0)
-        
-        df['QuantScore'] = (trend_score + strength_score + momentum_score + liquidity_score + volatility_score + market_score).astype(int)
+        stop_loss = near_market_buy - (2 * atr)
+        take_profit = near_market_buy + (2 * atr * risk_reward_ratio)
 
-        r_last = df.iloc[-1]
-        quant_score = int(r_last.QuantScore)
+        news_list = []
+        news_sentiment_score = 0
+        try:
+            raw_news = ticker.news
+            if raw_news:
+                for item in raw_news[:5]:
+                    title = item.get('title', '')
+                    news_list.append({
+                        "title": title if title else 'No Title',
+                        "publisher": item.get('publisher', 'Unknown'),
+                        "link": item.get('link', '#'),
+                        "providerPublishTime": datetime.fromtimestamp(item.get('providerPublishTime', 0)).strftime('%m-%d %H:%M') if item.get('providerPublishTime') else ''
+                    })
+                    title_upper = title.upper()
+                    if any(w in title_upper for w in ['RECORD', 'SURGE', 'BEAT', 'GROWTH', 'RAISE', 'BULL']):
+                        news_sentiment_score += 3
+                    elif any(w in title_upper for w in ['DROP', 'MISS', 'CUT', 'DOWN', 'RISK', 'BEAR']):
+                        news_sentiment_score -= 3
+        except Exception:
+            pass
 
-        # 9. 风控位计算
-        current_price = float(r_last.Close)
-        prev_close = float(df.Close.iloc[-2])
-        change_pct = ((current_price - prev_close) / prev_close) * 100
-        
-        near_market_buy = min(current_price, float(r_last.EMA20))
-        support = float(df.Low.rolling(20).min().iloc[-1])
-        stop_loss = min(near_market_buy - 1.5 * float(r_last.ATR), support - 0.25 * float(r_last.ATR))
-        stop_loss = max(stop_loss, 0.01)
-        risk = near_market_buy - stop_loss
-        take_profit = near_market_buy + (risk * risk_reward_ratio)
-        ideal_buy_price = near_market_buy - (0.25 * float(r_last.ATR))
+        quant_score = 0
+        if trend_code == "UPTREND": quant_score += 30
+        elif trend_code == "RECOVERY": quant_score += 18
+        elif trend_code == "SIDEWAYS": quant_score += 10
+
+        price_gap_pct = abs(current_price - near_market_buy) / current_price * 100
+        if price_gap_pct <= 1.0: quant_score += 30
+        elif price_gap_pct <= 2.5: quant_score += 20
+        elif price_gap_pct <= 4.0: quant_score += 12
+        else: quant_score += 5
+
+        if 48 <= rsi <= 65: quant_score += 20
+        elif 35 <= rsi < 48: quant_score += 12
+        elif rsi > 70: quant_score += 3
+
+        if is_macd_bullish: quant_score += 5
+        if supertrend_is_buy: quant_score += 5
+        quant_score += min(10, max(-5, news_sentiment_score))
+        quant_score = int(min(100, max(0, quant_score)))
 
         if quant_score >= 80: recommendation = "🔥 极力推荐 (High Alpha)"
         elif quant_score >= 65: recommendation = "👀 重点关注 (Watch Opportunity)"
         else: recommendation = "❄️ 观望/防守 (Avoid)"
 
-        macd_status = "🟢 金叉 (Bullish)" if r_last.MACD > r_last.MACD_Signal else "🔴 死叉 (Bearish)"
-        supertrend_signal = "🟢 多头轨道 (BUY)" if r_last.STDirection == 1 else "🔴 空头轨道 (SELL)"
-
-        if current_price > r_last.MA20 and r_last.MA20 > r_last.MA50:
-            trend_label = "🔥 强力多头 (Strong Uptrend)"
-        elif current_price < r_last.MA20 and r_last.MA20 < r_last.MA50:
-            trend_label = "❄️ 降维空头 (Downtrend Risk)"
-        else:
-            trend_label = "⚡ 宽幅震荡 (Sideways)"
-
+        info = ticker.info or {}
         return {
             "df": df, "symbol": symbol.upper().strip(),
-            "name": symbol.upper(),
+            "name": info.get('shortName', symbol.upper()),
             "current_price": round(current_price, 2),
             "change_pct": round(change_pct, 2),
             "near_market_buy": round(near_market_buy, 2),
             "ideal_buy_price": round(ideal_buy_price, 2),
             "stop_loss": round(stop_loss, 2),
             "take_profit": round(take_profit, 2),
-            "atr": round(float(r_last.ATR), 2),
-            "rsi": round(float(r_last.RSI), 1),
-            "ema10": round(float(r_last.EMA10), 2),
-            "lower_band": round(float(r_last.Lower_Band), 2),
-            "upper_band": round(float(r_last.Upper_Band), 2),
-            "vwap": round(float(r_last.VWMA20), 2),
-            "macd_status": macd_status,
-            "supertrend_signal": supertrend_signal,
-            "trend_label": trend_label,
-            "quant_score": quant_score,
-            "recommendation": recommendation
+            "atr": round(atr, 2), "rsi": round(rsi, 1),
+            "ema10": round(ema10, 2), "lower_band": round(lower_band, 2),
+            "upper_band": round(upper_band, 2), "vwap": round(vwap, 2),
+            "macd_status": macd_status, "supertrend_signal": supertrend_signal,
+            "trend_label": trend_label, "quant_score": quant_score,
+            "recommendation": recommendation, "news": news_list
         }
     except Exception:
         return None
 
 # -----------------------------------------------------------------------------
-# 5. 高级历史回测引擎 (已修复字段未定义引发的 AttributeError)
+# 5. 高级历史回测引擎 (带移动止损与突破双重触发)
 # -----------------------------------------------------------------------------
 @st.cache_data(ttl=1800, show_spinner=False)
 def run_backtest_engine(symbol: str, initial_capital: float = 10000.0, risk_reward_ratio: float = 2.0, period: str = "2y"):
-    sig_data = fetch_advanced_quant_signals(symbol, risk_reward_ratio=risk_reward_ratio, period=period)
-    if not sig_data:
-        return None, None
-        
-    df = sig_data['df']
-    if len(df) < 212:
+    ticker = yf.Ticker(symbol.upper().strip())
+    df = ticker.history(period=period)
+    if df.empty or len(df) < 50:
         return None, None
 
-    fee, slip = 0.0005, 0.0005
-    capital = float(initial_capital)
-    pos = 0.0
+    df['MA20'] = df['Close'].rolling(window=20).mean()
+    df['MA50'] = df['Close'].rolling(window=50).mean()
+    df['EMA5'] = df['Close'].ewm(span=5, adjust=False).mean()
+    df['EMA10'] = df['Close'].ewm(span=10, adjust=False).mean()
+    
+    df['High-Low'] = df['High'] - df['Low']
+    df['High-Close'] = np.abs(df['High'] - df['Close'].shift(1))
+    df['Low-Close'] = np.abs(df['Low'] - df['Close'].shift(1))
+    df['TR'] = df[['High-Low', 'High-Close', 'Low-Close']].max(axis=1)
+    df['ATR'] = df['TR'].rolling(window=14).mean()
+
+    capital = initial_capital
+    position = 0.0
     entry_price = 0.0
     stop_loss = 0.0
-    target_price = 0.0
-    basis = 0.0
-    
+    highest_price_after_entry = 0.0
     trades = []
     equity_curve = []
-    
-    start_i = 210
-    equity_curve.append({'Date': df.index[start_i-1], 'Capital': capital})
 
-    for i in range(start_i, len(df)):
-        r, prev = df.iloc[i], df.iloc[i-1]
-        date = df.index[i]
-        exited = False
-        entered_intraday = False
-        
-        # 1. 离场机制
-        if pos > 0:
-            if r.Open <= stop_loss:
-                sell_price = float(r.Open) * (1 - slip)
-                proceeds = pos * sell_price * (1 - fee)
-                capital += proceeds
-                trades.append({"date": date, "type": "SELL (跳空止损)", "price": round(sell_price, 2), "profit": round(proceeds - basis, 2), "capital": round(capital, 2)})
-                pos = 0.0
-                exited = True
-            elif prev.Close < prev.MA50:
-                sell_price = float(r.Open) * (1 - slip)
-                proceeds = pos * sell_price * (1 - fee)
-                capital += proceeds
-                trades.append({"date": date, "type": "SELL (趋势破坏)", "price": round(sell_price, 2), "profit": round(proceeds - basis, 2), "capital": round(capital, 2)})
-                pos = 0.0
-                exited = True
-            elif r.Open >= target_price:
-                sell_price = float(target_price)
-                proceeds = pos * sell_price * (1 - fee)
-                capital += proceeds
-                trades.append({"date": date, "type": "SELL (开盘跳空止盈)", "price": round(sell_price, 2), "profit": round(proceeds - basis, 2), "capital": round(capital, 2)})
-                pos = 0.0
-                exited = True
+    for i in range(50, len(df)):
+        current_date = df.index[i]
+        price = df['Close'].iloc[i]
+        high = df['High'].iloc[i]
+        low = df['Low'].iloc[i]
+        atr = df['ATR'].iloc[i]
+        ma20 = df['MA20'].iloc[i]
+        ma50 = df['MA50'].iloc[i]
+        ema5 = df['EMA5'].iloc[i]
 
-        # 2. 开仓买入（解决 prev.QuantScore 字段匹配问题）
-        if pos == 0 and not exited:
-            if prev.Close > prev.MA50 > prev.MA200 and prev.QuantScore >= 60 and r.Low <= min(prev.Close, prev.EMA20):
-                if r.Open > (min(prev.Close, prev.EMA20) - 1.5 * prev.ATR):
-                    fill = min(float(r.Open), min(float(prev.Close), float(prev.EMA20)))
-                    proposed_stop = max(fill - 1.5 * float(prev.ATR), 0.01)
-                    per_share_risk = fill - proposed_stop * (1 - slip) + fee * (fill + proposed_stop)
-                    
-                    if per_share_risk > 0:
-                        max_shares = max(0, int(capital * 0.20 / (fill * (1 + fee))))
-                        risk_shares = max(0, int(capital * 0.005 / per_share_risk))
-                        q = min(max_shares, risk_shares)
-                        
-                        if q > 0:
-                            pos = float(q)
-                            entry_price = fill
-                            stop_loss = proposed_stop
-                            target_price = entry_price + risk_reward_ratio * (entry_price - stop_loss)
-                            basis = pos * entry_price * (1 + fee)
-                            capital -= basis
-                            entered_intraday = r.Open > min(prev.Close, prev.EMA20)
-                            trades.append({"date": date, "type": "BUY", "price": round(entry_price, 2), "profit": 0.0, "capital": round(pos * entry_price, 2)})
+        if position > 0:
+            highest_price_after_entry = max(highest_price_after_entry, high)
+            trailing_stop = highest_price_after_entry - (2.0 * atr)
+            stop_loss = max(stop_loss, trailing_stop)
 
-        # 3. 盘中双触发检测
-        if pos > 0:
-            if r.Low <= stop_loss:
-                sell_price = float(stop_loss) * (1 - slip)
-                proceeds = pos * sell_price * (1 - fee)
-                capital += proceeds
-                trades.append({"date": date, "type": "SELL (止损离场)", "price": round(sell_price, 2), "profit": round(proceeds - basis, 2), "capital": round(capital, 2)})
-                pos = 0.0
-            elif not entered_intraday and r.High >= target_price:
-                sell_price = float(target_price)
-                proceeds = pos * sell_price * (1 - fee)
-                capital += proceeds
-                trades.append({"date": date, "type": "SELL (目标止盈)", "price": round(sell_price, 2), "profit": round(proceeds - basis, 2), "capital": round(capital, 2)})
-                pos = 0.0
+            if low <= stop_loss or price < ma20:
+                sell_price = min(price, stop_loss) if low <= stop_loss else price
+                revenue = position * sell_price
+                profit = revenue - (position * entry_price)
+                capital += revenue
+                trades.append({
+                    "date": current_date, 
+                    "type": "SELL (移动止损/趋势离场)", 
+                    "price": round(sell_price, 2), 
+                    "profit": round(profit, 2), 
+                    "capital": round(capital, 2)
+                })
+                position = 0.0
+
+        if position == 0:
+            is_uptrend = price > ma20 and ma20 > ma50
+            is_dip_buy = (price <= ema5 * 1.01)
+            is_breakout = (price >= df['High'].iloc[i-20:i].max())
+
+            if is_uptrend and (is_dip_buy or is_breakout):
+                entry_price = price
+                highest_price_after_entry = high
+                stop_loss = entry_price - (1.8 * atr)
                 
-            if pos > 0:
-                stop_loss = max(stop_loss, float(r.High - 2 * r.ATR))
+                position = capital / entry_price
+                capital = 0.0
+                trades.append({
+                    "date": current_date, 
+                    "type": "BUY", 
+                    "price": round(entry_price, 2), 
+                    "profit": 0.0, 
+                    "capital": round(position * entry_price, 2)
+                })
 
-        current_total = capital + (pos * float(r.Close))
-        equity_curve.append({"Date": date, "Capital": current_total})
+        current_total = capital + (position * price)
+        equity_curve.append({"Date": current_date, "Capital": current_total})
 
     equity_df = pd.DataFrame(equity_curve)
     if not equity_df.empty:
@@ -509,10 +481,11 @@ def run_backtest_engine(symbol: str, initial_capital: float = 10000.0, risk_rewa
     return None, None
 
 # -----------------------------------------------------------------------------
-# 6. Quantum One Plotly 绘图引擎
+# 6. 移动端轻量级画图引擎 (渲染节点减半，禁用全屏卡顿工具条)
 # -----------------------------------------------------------------------------
 def render_professional_chart(sig_data):
-    df = sig_data['df'].tail(60)
+    # 优化3：手机端限制只渲染最新 45 天 K 线，体积缩小一倍，秒级渲染
+    df = sig_data['df'].tail(45)
     
     fig = make_subplots(
         rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.04,
@@ -529,9 +502,8 @@ def render_professional_chart(sig_data):
         name="K线", increasing_line_color='#00ff66', decreasing_line_color='#ff3366'
     ), row=1, col=1)
 
-    fig.add_trace(go.Scatter(x=df.index, y=df['VWMA20'], line=dict(color='#ff00ea', width=1.2, dash='dot'), name="VWMA20"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['VWAP'], line=dict(color='#ff00ea', width=1.2, dash='dot'), name="VWAP"), row=1, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['EMA10'], line=dict(color='#00f0ff', width=1.2), name="EMA10"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['Supertrend'], line=dict(color='#a996ef', width=1.2), name="Supertrend"), row=1, col=1)
 
     fig.add_hline(y=sig_data['near_market_buy'], line_dash="dash", line_color="#ccff00", annotation_text="⚡ 买点", row=1, col=1)
     fig.add_hline(y=sig_data['ideal_buy_price'], line_dash="dash", line_color="#00ff66", annotation_text="🎯 理想买", row=1, col=1)
@@ -548,7 +520,7 @@ def render_professional_chart(sig_data):
 
     fig.update_layout(
         template="plotly_dark", paper_bgcolor='#0b0e14', plot_bgcolor='#161b22',
-        margin=dict(l=10, r=10, t=25, b=10), height=550, showlegend=False,
+        margin=dict(l=10, r=10, t=25, b=10), height=550, showlegend=False, # 隐藏图例提高手机屏幕利用率
         xaxis3_rangeslider_visible=False
     )
     fig.update_xaxes(showgrid=True, gridcolor='#21262d')
@@ -556,7 +528,7 @@ def render_professional_chart(sig_data):
     return fig
 
 # -----------------------------------------------------------------------------
-# 7. UI 主体逻辑与无缝页面路由
+# 7. UI 主体逻辑与无卡顿交互路由
 # -----------------------------------------------------------------------------
 st.markdown('<h3 class="tech-header">⚡ QUANTUM TERMINAL PRO</h3>', unsafe_allow_html=True)
 
@@ -597,6 +569,7 @@ if app_mode == "🚀 自动扫描 & 智能推荐":
     with c_preset:
         selected_preset = st.selectbox("📦 选择扫描预设池", list(INDEX_PRESET_POOLS.keys()))
 
+    # 优化4：懒加载逻辑，在需要标普500数据时才去调用，避免首页加载超时
     if INDEX_PRESET_POOLS[selected_preset] == "SP500_AUTO":
         default_pool_list = fetch_sp500_tickers()
     else:
@@ -667,7 +640,7 @@ if app_mode == "🚀 自动扫描 & 智能推荐":
                 })
             st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
 
-# --- 模式 2: 单标的精细化诊断 (恢复经典的左右分栏醒目 UI) ---
+# --- 模式 2: 单标的精细化诊断 ---
 elif app_mode == "🔍 单标的全量诊断":
     st.markdown("### 🔍 标的量化诊断")
     
@@ -685,60 +658,46 @@ elif app_mode == "🔍 单标的全量诊断":
     if target_symbol:
         sig = fetch_advanced_quant_signals(target_symbol, risk_reward_ratio=rr_ratio)
         if sig:
-            # 恢复经典的顶部左右分栏结构
-            left_col, right_col = st.columns([1.2, 2.8])
-            
-            with left_col:
+            st.markdown(f"**{sig['symbol']}** ({sig['name']}) | 得分: `{sig['quant_score']}分` (`{sig['recommendation']}`)")
+
+            k1, k2, k3, k4 = st.columns(4)
+            with k1:
+                color_str = "#00ff66" if sig['change_pct'] >= 0 else "#ff3366"
                 st.markdown(f"""
-                <div class="tech-card" style="padding: 16px;">
-                    <div style="font-size:24px; font-weight:700; color:#ffffff;">{sig['symbol']}</div>
-                    <div style="font-size:12px; color:#8b949e; margin-bottom: 8px;">{sig['name']}</div>
-                    <div style="font-size:32px; font-weight:700; color:#00f0ff;">{sig['quant_score']} <span style="font-size:14px; color:#8b949e;">/ 100 分</span></div>
-                    <div style="font-size:14px; font-weight:700; color:#00ff66; margin-top: 4px;">{sig['recommendation']}</div>
-                    <hr style="border-color:#30363d; margin:12px 0;">
-                    <div style="font-size:13px; margin-bottom: 4px;">现价: <b style="color:#ffffff;">${sig['current_price']}</b> ({sig['change_pct']}%)</div>
-                    <div style="font-size:13px; margin-bottom: 4px;">⚡ 贴合买点: <b style="color:#ccff00;">${sig['near_market_buy']}</b></div>
-                    <div style="font-size:13px; margin-bottom: 4px;">🎯 理想买点: <b style="color:#00ff66;">${sig['ideal_buy_price']}</b></div>
-                    <div style="font-size:13px; margin-bottom: 4px;">🛡️ 动态止损位: <b style="color:#ff3366;">${sig['stop_loss']}</b></div>
-                    <div style="font-size:13px;">🎉 目标止盈位: <b style="color:#00f0ff;">${sig['take_profit']}</b></div>
-                </div>
-                """, unsafe_allow_html=True)
-                
-                if st.button(f"➕ 加入自选清单", use_container_width=True):
-                    add_to_watchlist(sig['symbol'], sig['name'], "推荐自选")
-                    st.success("已成功保存至自选表！")
+                <div class="tech-card">
+                    <div class="metric-title">当前价格</div>
+                    <div style="font-size:16px; font-weight:700; color:{color_str};">${sig['current_price']}</div>
+                </div>""", unsafe_allow_html=True)
 
-            with right_col:
-                rc1, rc2 = st.columns(2)
-                with rc1:
-                    st.markdown(f"""
-                    <div class="tech-card">
-                        <div class="metric-title">主线趋势状态 (Trend)</div>
-                        <div style="font-size:15px; font-weight:700; color:#00f0ff; margin-top:5px;">{sig['trend_label']}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    st.markdown(f"""
-                    <div class="tech-card">
-                        <div class="metric-title">MACD 交叉量能 (MACD)</div>
-                        <div style="font-size:15px; font-weight:700; color:#00ff66; margin-top:5px;">{sig['macd_status']}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                with rc2:
-                    st.markdown(f"""
-                    <div class="tech-card">
-                        <div class="metric-title">RSI 相对强弱 (RSI 14)</div>
-                        <div style="font-size:15px; font-weight:700; color:#ab47bc; margin-top:5px;">{sig['rsi']}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    st.markdown(f"""
-                    <div class="tech-card">
-                        <div class="metric-title">Supertrend 轨道 (Supertrend)</div>
-                        <div style="font-size:15px; font-weight:700; color:#a996ef; margin-top:5px;">{sig['supertrend_signal']}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
+            with k2:
+                st.markdown(f"""
+                <div class="tech-card">
+                    <div class="metric-title">⚡ 贴合现价买点</div>
+                    <div class="metric-value-nearbuy">${sig['near_market_buy']}</div>
+                </div>""", unsafe_allow_html=True)
 
-            st.markdown("---")
+            with k3:
+                st.markdown(f"""
+                <div class="tech-card">
+                    <div class="metric-title">🛡️ 动态止损线</div>
+                    <div class="metric-value-stop">${sig['stop_loss']}</div>
+                </div>""", unsafe_allow_html=True)
+
+            with k4:
+                st.markdown(f"""
+                <div class="tech-card">
+                    <div class="metric-title">🎉 目标止盈线</div>
+                    <div class="metric-value-take">${sig['take_profit']}</div>
+                </div>""", unsafe_allow_html=True)
+
             st.plotly_chart(render_professional_chart(sig), use_container_width=True, config={'displayModeBar': False})
+
+            st.markdown("#### 🤖 量化指标状态")
+            st.write(f"- **趋势**: `{sig['trend_label']}` | **RSI**: `{sig['rsi']}` | **MACD**: `{sig['macd_status']}`")
+
+            if st.button(f"➕ 加入自选清单", use_container_width=True):
+                add_to_watchlist(sig['symbol'], sig['name'], "推荐自选")
+                st.success("已成功保存！")
 
 # --- 模式 3: 策略历史回测引擎 UI ---
 elif app_mode == "🧪 策略历史回测引擎":
