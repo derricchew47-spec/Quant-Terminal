@@ -163,6 +163,8 @@ if 'current_page' not in st.session_state:
     st.session_state['current_page'] = NAV_OPTIONS[0]
 if 'selected_ticker' not in st.session_state:
     st.session_state['selected_ticker'] = "NVDA"
+if 'rr_ratio' not in st.session_state:
+    st.session_state['rr_ratio'] = 2.0
 
 @st.cache_data(ttl=86400)
 def fetch_sp500_tickers():
@@ -222,7 +224,7 @@ init_quant_db()
 # -----------------------------------------------------------------------------
 # 4. 多维度量化指标计算 & 智能推选打分引擎
 # -----------------------------------------------------------------------------
-@st.cache_data(ttl=900)
+@st.cache_data(ttl=1800)
 def fetch_advanced_quant_signals(symbol: str, risk_reward_ratio: float = 2.0, period: str = "1y"):
     if not symbol or not symbol.strip():
         return None
@@ -387,21 +389,20 @@ def fetch_advanced_quant_signals(symbol: str, risk_reward_ratio: float = 2.0, pe
         return None
 
 # -----------------------------------------------------------------------------
-# 5. 历史回测引擎 (Backtest Engine)
+# 5. 高级历史回测引擎 (带移动止损与突破双重触发)
 # -----------------------------------------------------------------------------
-def run_backtest_engine(symbol: str, initial_capital: float = 10000.0, risk_reward_ratio: float = 2.5, period: str = "2y"):
+@st.cache_data(ttl=1800)
+def run_backtest_engine(symbol: str, initial_capital: float = 10000.0, risk_reward_ratio: float = 2.0, period: str = "2y"):
     ticker = yf.Ticker(symbol.upper().strip())
     df = ticker.history(period=period)
     if df.empty or len(df) < 50:
         return None, None
 
-    # 计算技术指标
     df['MA20'] = df['Close'].rolling(window=20).mean()
     df['MA50'] = df['Close'].rolling(window=50).mean()
     df['EMA5'] = df['Close'].ewm(span=5, adjust=False).mean()
     df['EMA10'] = df['Close'].ewm(span=10, adjust=False).mean()
     
-    # 计算 ATR
     df['High-Low'] = df['High'] - df['Low']
     df['High-Close'] = np.abs(df['High'] - df['Close'].shift(1))
     df['Low-Close'] = np.abs(df['Low'] - df['Close'].shift(1))
@@ -426,16 +427,11 @@ def run_backtest_engine(symbol: str, initial_capital: float = 10000.0, risk_rewa
         ma50 = df['MA50'].iloc[i]
         ema5 = df['EMA5'].iloc[i]
 
-        # --- 持仓逻辑 (追踪止损 & 利润奔跑) ---
         if position > 0:
-            # 更新买入后的最高价
             highest_price_after_entry = max(highest_price_after_entry, high)
-            
-            # 动态移动止损线 (以最高价回撤 2 倍 ATR 或跌破 MA20 止损)
             trailing_stop = highest_price_after_entry - (2.0 * atr)
             stop_loss = max(stop_loss, trailing_stop)
 
-            # 触发止损或跌破 20 日线离场
             if low <= stop_loss or price < ma20:
                 sell_price = min(price, stop_loss) if low <= stop_loss else price
                 revenue = position * sell_price
@@ -450,18 +446,14 @@ def run_backtest_engine(symbol: str, initial_capital: float = 10000.0, risk_rewa
                 })
                 position = 0.0
 
-        # --- 开仓逻辑 (宽松多头 + 双重触发机制) ---
         if position == 0:
             is_uptrend = price > ma20 and ma20 > ma50
-            # 条件A: 回调到 EMA5/EMA10 支撑线附近
             is_dip_buy = (price <= ema5 * 1.01)
-            # 条件B: 突破近 20 日高点 (追涨突破)
             is_breakout = (price >= df['High'].iloc[i-20:i].max())
 
             if is_uptrend and (is_dip_buy or is_breakout):
                 entry_price = price
                 highest_price_after_entry = high
-                # 初始止损线设为 1.8 * ATR
                 stop_loss = entry_price - (1.8 * atr)
                 
                 position = capital / entry_price
@@ -498,6 +490,7 @@ def run_backtest_engine(symbol: str, initial_capital: float = 10000.0, risk_rewa
         }
         return metrics, equity_df
     return None, None
+
 # -----------------------------------------------------------------------------
 # 6. 专业级三分栏画图引擎
 # -----------------------------------------------------------------------------
@@ -545,30 +538,39 @@ def render_professional_chart(sig_data):
     return fig
 
 # -----------------------------------------------------------------------------
-# 7. UI 主体逻辑与交互路由
+# 7. UI 主体逻辑与交互路由 (包含事件回调 & 彻底解决重复点击卡顿)
 # -----------------------------------------------------------------------------
 st.markdown('<h2 class="tech-header">⚡ QUANTUM TERMINAL PRO</h2>', unsafe_allow_html=True)
+
+def on_nav_change():
+    st.session_state['current_page'] = st.session_state['nav_radio_choice']
 
 with st.sidebar:
     st.markdown("### 🎛️ 终端功能控制台")
     
     current_idx = NAV_OPTIONS.index(st.session_state['current_page']) if st.session_state['current_page'] in NAV_OPTIONS else 0
     
-    selected_menu = st.radio(
+    st.radio(
         "导航菜单",
         NAV_OPTIONS,
         index=current_idx,
+        key="nav_radio_choice",
+        on_change=on_nav_change,
         label_visibility="collapsed"
     )
-    
-    if selected_menu != st.session_state['current_page']:
-        st.session_state['current_page'] = selected_menu
 
     st.markdown("---")
-    st.markdown("#### ⚙️ 策略风控设置")
-    rr_ratio = st.slider("目标盈亏比 (Risk-Reward)", 1.0, 4.0, 2.0, 0.5)
+    # 使用 Form 打包风控参数，解决参数输入失焦事件冲突
+    with st.form(key="global_setting_form"):
+        st.markdown("#### ⚙️ 策略风控设置")
+        new_rr = st.slider("目标盈亏比 (Risk-Reward)", 1.0, 4.0, float(st.session_state['rr_ratio']), 0.5)
+        form_submitted = st.form_submit_button("应用风控配置", use_container_width=True)
+        if form_submitted:
+            st.session_state['rr_ratio'] = new_rr
+            st.rerun()
 
 app_mode = st.session_state['current_page']
+rr_ratio = st.session_state['rr_ratio']
 
 # --- 模式 1: 自动化全市场扫描推荐 ---
 if app_mode == "🚀 自动扫描 & 智能推荐":
@@ -658,15 +660,19 @@ if app_mode == "🚀 自动扫描 & 智能推荐":
 # --- 模式 2: 单标的精细化诊断 ---
 elif app_mode == "🔍 单标的全量诊断":
     st.markdown("### 🔍 标的精细量化算价与图表诊断")
-    c_in, c_b = st.columns([4, 1])
-    with c_in:
-        target_symbol = st.text_input("输入股票代码 (Ticker)", value=st.session_state.get('selected_ticker', 'NVDA')).upper().strip()
-    with c_b:
-        st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
-        st.button("⚡ 诊断标的", use_container_width=True)
+    
+    with st.form(key="symbol_search_form"):
+        c_in, c_b = st.columns([4, 1])
+        with c_in:
+            target_symbol = st.text_input("输入股票代码 (Ticker)", value=st.session_state.get('selected_ticker', 'NVDA')).upper().strip()
+        with c_b:
+            st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+            search_submitted = st.form_submit_button("⚡ 诊断标的", use_container_width=True)
+            if search_submitted:
+                st.session_state['selected_ticker'] = target_symbol
 
+    target_symbol = st.session_state.get('selected_ticker', 'NVDA')
     if target_symbol:
-        st.session_state['selected_ticker'] = target_symbol
         sig = fetch_advanced_quant_signals(target_symbol, risk_reward_ratio=rr_ratio)
         if sig:
             st.markdown(f"### 🎯 标的: **{sig['symbol']}** ({sig['name']}) | 量化得分: `{sig['quant_score']}分` (`{sig['recommendation']}`)")
@@ -755,16 +761,17 @@ elif app_mode == "🔍 单标的全量诊断":
 # --- 模式 3: 策略历史回测引擎 UI ---
 elif app_mode == "🧪 策略历史回测引擎":
     st.markdown("### 🧪 策略历史回测与绩效分析 (Backtest Engine)")
-    st.caption("验证规则：基于贴合买点与止盈止损策略，对过去 2 年历史行情进行全量模拟机械交易。")
+    st.caption("验证规则：基于贴合买点与移动追踪止损策略，对过去 2 年历史行情进行全量模拟机械交易。")
 
-    c_bt_sym, c_bt_cap, c_bt_btn = st.columns([2, 2, 1.5])
-    with c_bt_sym:
-        bt_symbol = st.text_input("回测股票代码", value=st.session_state.get('selected_ticker', 'NVDA')).upper().strip()
-    with c_bt_cap:
-        init_capital = st.number_input("初始资金 ($)", value=10000, step=1000)
-    with c_bt_btn:
-        st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
-        run_bt = st.button("🚀 启动回测", use_container_width=True)
+    with st.form(key="backtest_form"):
+        c_bt_sym, c_bt_cap, c_bt_btn = st.columns([2, 2, 1.5])
+        with c_bt_sym:
+            bt_symbol = st.text_input("回测股票代码", value=st.session_state.get('selected_ticker', 'NVDA')).upper().strip()
+        with c_bt_cap:
+            init_capital = st.number_input("初始资金 ($)", value=10000, step=1000)
+        with c_bt_btn:
+            st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+            run_bt = st.form_submit_button("🚀 启动回测", use_container_width=True)
 
     if run_bt or 'bt_metrics' in st.session_state:
         if run_bt:
