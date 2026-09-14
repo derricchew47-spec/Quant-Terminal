@@ -1,3 +1,29 @@
+# QuantumSignal ULTRA - single-file Streamlit deployment
+# Upload only app.py and requirements.txt to the same GitHub directory.
+# Original UI layout/styles preserved. No broker or order-submission integration.
+# Default: audited original signal; unvalidated research strategies remain disabled.
+
+from pathlib import Path
+import tempfile
+
+"""Backend-only settings. The original UI structure is unchanged."""
+# Keep the audited original signal as default: candidate superiority was NOT proven.
+# Research alternatives: 'pullback', 'breakout', 'resume'. These use next-day market
+# entry regardless of the original limit/market switch, and remain experimental.
+SIGNAL_MODEL = 'baseline'
+
+# Optional round-2 entry/exit strategy (None keeps the audited baseline).
+# Choices: structure_15, confirm_15, confirm_10, resume_15, atr20_15,
+# confirm_full15. The selected confirm_10 FAILED new-stock validation.
+# If exploring it, set ROUND2_STRATEGY='confirm_10' and use the EXISTING
+# advanced controls: RR=1.0, partial=0.5, breakeven=1.0, conservative risk.
+# Round-2 entry triggers supersede the old market/limit choice while enabled.
+ROUND2_STRATEGY = None
+
+# The final joint win-rate + net-profit selection chose atr20_15, but it also
+# failed validation/cost stress. To inspect it only: ROUND2_STRATEGY='atr20_15',
+# original advanced controls RR=1.5, partial=0.5, breakeven=1.5, conservative risk.
+
 # ============================================================================
 # QuantumSignal Terminal ULTRA | Enhanced Backtest Engine & Advanced Scoring
 # Version: ULTRA_8.1_PATCHED
@@ -45,7 +71,10 @@ import requests
 import streamlit as st
 import yfinance as yf
 
-VERSION = "ULTRA_8.1_PATCHED"
+VERSION = "ULTRA_8.2_SINGLE_FILE"
+_cache_dir = Path(tempfile.gettempdir()) / "quantumsignal_ultra_cache"
+_cache_dir.mkdir(parents=True, exist_ok=True)
+yf.set_tz_cache_location(str(_cache_dir / "yfinance"))
 
 # -----------------------------------------------------------------------------
 # 1. 页面配置与 Cyberpunk 视觉样式
@@ -342,48 +371,6 @@ init_quant_db()
 # -----------------------------------------------------------------------------
 # 5. 行情与多维精细评分矩阵 (任务H: 数据清洗校验 & 任务G: 200日线数据充足性校验)
 # -----------------------------------------------------------------------------
-def fetch_history(symbol: str, period: str = "3y"):
-    symbol = symbol.upper().strip()
-    try:
-        ticker = yf.Ticker(symbol)
-        frame = ticker.history(period=period, interval="1d", auto_adjust=True, actions=False)
-    except Exception as err:
-        raise RuntimeError(f"网络/API 获取失败 ({str(err)})") from err
-
-    if frame is None or frame.empty:
-        raise ValueError("拉取到的行情数据为空，可能已退市或代码不正确")
-
-    frame = frame.rename(columns={c: str(c).title() for c in frame.columns})
-    required = ["Open", "High", "Low", "Close", "Volume"]
-    if not all(c in frame.columns for c in required):
-        raise ValueError(f"缺少关键 OHLCV 列，现有列: {list(frame.columns)}")
-
-    frame = frame[required].copy()
-
-    # [任务H]: 基本合理性数据校验
-    valid_mask = (
-        (frame["High"] >= frame[["Open", "Close", "Low"]].max(axis=1))
-        & (frame["Low"] <= frame[["Open", "Close", "High"]].min(axis=1))
-        & (frame["Close"] > 0)
-        & (frame["Open"] > 0)
-        & (frame["High"] > 0)
-        & (frame["Low"] > 0)
-        & (frame["Volume"] >= 0)
-    )
-    frame = frame.loc[valid_mask].copy()
-
-    idx = pd.DatetimeIndex(frame.index)
-    try:
-        idx = idx.tz_localize(None)
-    except Exception:
-        pass
-    frame.index = idx.normalize()
-    frame = frame.loc[~frame.index.duplicated(keep="last")].sort_index()
-
-    if len(frame) < 35:
-        raise ValueError(f"历史 K 线数据量不足 ({len(frame)}/35 根)，无法计算完整指标")
-
-    return frame
 
 
 def wilder(series: pd.Series, n: int = 14) -> pd.Series:
@@ -401,7 +388,7 @@ def wilder(series: pd.Series, n: int = 14) -> pd.Series:
     return res
 
 
-def indicators(frame, benchmark=None):
+def _base_indicators(frame, benchmark=None):
     d = frame.copy()
     c, h, l, v = d.Close, d.High, d.Low, d.Volume
 
@@ -530,71 +517,6 @@ def analyze_technical_aspects(row, cfg=None):
     return features
 
 
-def plan(row, cfg=None):
-    cfg = cfg or Config()
-    required = ["Close", "ATR", "MA50", "MA200", "Support", "EMA10", "EMA20", "RSI", "Score", "DonchianHigh20", "DollarVolume", "ATRpct", "BiasMA20"]
-    if any(k not in row or not np.isfinite(row[k]) for k in required) or row.ATR <= 0:
-        return None
-
-    reasons = []
-
-    # [任务G]: 显式处理大盘数据不足
-    # [v8.1 Patch 1]: np.where() 返回的是 numpy 浮点数（1.0/0.0/nan），不是 Python 原生 bool，
-    # 用 `is False` 做身份比较永远不成立（0.0 is False 恒为 False），导致这条拦截从未真正生效。
-    # 改用数值比较 `market_ok == 0`，确保大盘破位时真的会被拦截。
-    market_ok = row.get("MarketOK", True)
-    if pd.isna(market_ok):
-        reasons.append("⚠️ 大盘历史数据不足200天，无法确认大盘趋势")
-    elif market_ok == 0 or row.Close < row.MA200:
-        reasons.append("🚫 熊市拦截：大盘或标的破位200日线")
-
-    if row.DollarVolume < cfg.min_dollar_volume:
-        reasons.append(f"💧 成交额不足 (${row.DollarVolume/1e6:.1f}M < ${cfg.min_dollar_volume/1e6:.1f}M)")
-    if row.ATRpct > cfg.max_atr_pct:
-        reasons.append(f"🌊 波动率过高 (ATR% {row.ATRpct:.1f}% > {cfg.max_atr_pct:.1f}%)")
-
-    if cfg.execution_mode.startswith("追势"):
-        entry = float(row.Close)
-        buy_mode_desc = "🚀 突破追势 (市价跟进)"
-    else:
-        entry = min(float(row.Close), float(row.EMA10))
-        buy_mode_desc = "🎯 稳健挂单 (限价跟进)"
-
-    stop = entry - 2.8 * row.ATR
-    risk = entry - stop
-    target = entry + cfg.rr * risk
-
-    if row.Close < cfg.min_price:
-        reasons.append("价格低于门槛")
-    if row.Score < cfg.min_score:
-        reasons.append("综合评分不足")
-
-    bias_warning = row.BiasMA20 > cfg.max_bias_pct
-
-    # 计算分拆细节
-    score_breakdown = {
-        "趋势分": int(row.get("ScoreTrend", 0)),
-        "MACD分": int(row.get("ScoreMACD", 0)),
-        "RSI分": int(row.get("ScoreRSI", 0)),
-        "量能分": int(row.get("ScoreVol", 0)),
-        "总分": int(row.Score),
-    }
-
-    return {
-        "entry": entry,
-        "stop": stop,
-        "target": target,
-        "risk": risk,
-        "eligible": len(reasons) == 0,
-        "reasons": reasons,
-        "score": int(row.Score),
-        "score_breakdown": score_breakdown,
-        "buy_mode": buy_mode_desc,
-        "atr_pct": float(row.ATRpct),
-        "relative63": float(row.get("Relative63", 0.0)),
-        "bias_warning": bias_warning,
-        "bias_val": float(row.BiasMA20),
-    }
 
 
 def make_signal(symbol, frame, cfg, benchmark):
@@ -632,478 +554,421 @@ def make_signal(symbol, frame, cfg, benchmark):
 # [v8.1 Patch 3]: R倍数统计现在基于每笔交易开仓时实际承担的风险金额 (current_risk_amt)，
 # 而不是固定用 initial * risk_pct 作分母 —— 后者会随着权益复利增长而逐渐失真。
 # -----------------------------------------------------------------------------
-def simulate(d, cfg=None, initial=10000.0, start=None):
-    cfg = cfg or Config()
-    start_i = 210 if start is None else max(210, int(d.index.searchsorted(pd.Timestamp(start))))
-    if start_i >= len(d):
-        raise ValueError(f"有效回测起始日期 {start} 超出历史范围或数据不足")
-
-    fee_pct = cfg.fee_bps / 1e4
-    slip_pct = cfg.slip_bps / 1e4
-
-    cash = float(initial)
-    pos = 0
-    entry_price = 0.0
-    planned_entry = 0.0
-    initial_risk = 0.0
-    stop = 0.0
-    next_day_stop = 0.0
-    target = 0.0
-    basis = 0.0
-    highest_after_entry = 0.0
-    current_risk_amt = 0.0  # [v8.1 Patch 3]: 当前持仓剩余的真实风险金额，随分批止盈按比例递减
-
-    tp_taken = False
-    breakeven_triggered = False
-
-    trades = []
-    curve = [{"Date": d.index[start_i - 1], "Equity": cash, "Benchmark": initial}]
-    benchmark_entry = float(d.Open.iloc[start_i])
-
-    for i in range(start_i, len(d)):
-        row, prev, date = d.iloc[i], d.iloc[i - 1], d.index[i]
-        current_equity = cash + (pos * row.Close if pos > 0 else 0)
-
-        # ---------------------------------------------------------------------
-        # [任务B.2]: 当天开盘生效的止损价是昨收盘后确定的止损价
-        # ---------------------------------------------------------------------
-        active_stop = next_day_stop if pos > 0 else stop
-
-        exited_today = False
-
-        # 1. 持仓出场检查 (如果今天有持仓)
-        if pos > 0:
-            highest_after_entry = max(highest_after_entry, float(row.High))
-
-            # [任务B.1]: 同日双触发时，止损优先结算
-            if row.Low <= active_stop:
-                exited_today = True
-                raw_exit_price = min(row.Open, active_stop) if row.Open < active_stop else active_stop
-                real_exit_price = raw_exit_price * (1.0 - slip_pct)
-                proceeds = pos * real_exit_price * (1.0 - fee_pct)
-                net_pnl = proceeds - basis
-
-                # [v8.1 Patch 3]: 用剩余的真实风险金额算这笔的R倍数
-                r_multiple = (net_pnl / current_risk_amt) if current_risk_amt > 0 else 0.0
-                current_risk_amt = 0.0
-
-                if breakeven_triggered and abs(real_exit_price - planned_entry) / planned_entry < 0.02:
-                    exit_reason = "🛡️ 保本止损出场"
-                else:
-                    exit_reason = "🚨 吊灯/唐奇安止损出场"
-
-                trades.append({
-                    "日期": date,
-                    "操作": "卖出",
-                    "原因": exit_reason,
-                    "成交价": real_exit_price,
-                    "净盈亏": net_pnl,
-                    "仓位占比%": round((pos * real_exit_price / current_equity) * 100, 2),
-                    "实际风险占比%": 0.0,
-                    "R倍数": r_multiple,
-                })
-                cash += proceeds
-                pos = 0
-                next_day_stop = 0.0
-
-            # [任务B.3 & D]: 只有当今天未发生止损平仓且仍有持仓时，才检查分批止盈
-            if (not exited_today) and (pos > 0) and (not tp_taken) and (cfg.partial_tp_ratio > 0) and (row.High >= target):
-                tp_shares = math.floor(pos * cfg.partial_tp_ratio)
-                if tp_shares > 0:
-                    raw_tp_price = min(row.High, target)
-                    real_tp_price = raw_tp_price * (1.0 - slip_pct)
-                    tp_proceeds = tp_shares * real_tp_price * (1.0 - fee_pct)
-                    tp_cost_portion = basis * (tp_shares / pos)
-                    tp_net_pnl = tp_proceeds - tp_cost_portion
-
-                    # [v8.1 Patch 3]: 按卖出份额比例分摊真实风险金额，算这笔止盈的R倍数
-                    sell_ratio = tp_shares / pos
-                    sell_risk_amt = current_risk_amt * sell_ratio
-                    r_multiple = (tp_net_pnl / sell_risk_amt) if sell_risk_amt > 0 else 0.0
-                    current_risk_amt -= sell_risk_amt
-
-                    trades.append({
-                        "日期": date,
-                        "操作": "卖出",
-                        "原因": "🎯 触及目标价分批止盈",
-                        "成交价": real_tp_price,
-                        "净盈亏": tp_net_pnl,
-                        "仓位占比%": round((tp_shares * real_tp_price / current_equity) * 100, 2),
-                        "实际风险占比%": 0.0,
-                        "R倍数": r_multiple,
-                    })
-
-                    cash += tp_proceeds
-                    pos -= tp_shares
-                    basis -= tp_cost_portion
-                    tp_taken = True
-
-                    # 分批止盈后若 pos 归零 (例如 partial_tp_ratio=1.0)，防止后续产生幽灵交易
-                    if pos == 0:
-                        exited_today = True
-                        next_day_stop = 0.0
-                        current_risk_amt = 0.0
-
-            # [任务B.2]: 尾盘根据当天走势计算新止损，延后至明日生效 (next_day_stop)
-            if pos > 0 and (not exited_today):
-                cand_stop = active_stop
-
-                be_target_price = planned_entry + (cfg.breakeven_trigger_r * initial_risk)
-                if (not breakeven_triggered) and (row.High >= be_target_price):
-                    breakeven_stop = planned_entry * 1.001
-                    cand_stop = max(cand_stop, breakeven_stop)
-                    breakeven_triggered = True
-
-                if tp_taken:
-                    cand_stop = max(cand_stop, planned_entry * 1.001)
-
-                chandelier_stop = highest_after_entry - 3.2 * row.ATR
-                donchian_stop = float(row.DonchianLow10)
-                next_day_stop = max(cand_stop, chandelier_stop, donchian_stop)
-
-        # 2. [任务B.4]: 开仓买入逻辑 (昨日信号 -> 今日开盘/盘中成交)
-        if pos == 0 and (not exited_today):
-            p = plan(prev, cfg)
-            if p and p["eligible"] and prev.VolRatio > 0.9:
-                planned_target_price = p["entry"]
-                should_buy = False
-                raw_fill_price = 0.0
-
-                if cfg.execution_mode.startswith("追势"):
-                    should_buy = True
-                    raw_fill_price = float(row.Open)
-                else:
-                    if row.Low <= planned_target_price:
-                        should_buy = True
-                        raw_fill_price = min(row.Open, planned_target_price)
-
-                if should_buy:
-                    real_fill_price = raw_fill_price * (1.0 + slip_pct)
-                    planned_entry = planned_target_price
-                    stop_price = p["stop"]
-
-                    # [任务C]: 把滑点和手续费算进"每股真实风险"
-                    # 每股真实风险 = (入场价 - 止损价 * (1 - 滑点)) + 手续费 * (入场价 + 止损价 * (1 - 滑点))
-                    stop_after_slip = stop_price * (1.0 - slip_pct)
-                    per_share_risk = (real_fill_price - stop_after_slip) + fee_pct * (real_fill_price + stop_after_slip)
-
-                    if per_share_risk > 0:
-                        risk_amount = current_equity * (cfg.risk_pct / 100.0)
-                        raw_shares = risk_amount / per_share_risk
-                        max_shares_cap = (current_equity * (cfg.max_position_pct / 100.0)) / real_fill_price
-                        max_shares_cash = (cash * 0.98) / (real_fill_price * (1.0 + fee_pct))
-
-                        final_shares = math.floor(min(raw_shares, max_shares_cap, max_shares_cash))
-
-                        if final_shares > 0:
-                            pos = final_shares
-                            entry_price = real_fill_price
-                            basis = pos * entry_price * (1.0 + fee_pct)
-                            cash -= basis
-
-                            stop = stop_price
-                            next_day_stop = stop_price
-                            target = p["target"]
-                            initial_risk = planned_entry - stop
-                            highest_after_entry = entry_price
-
-                            tp_taken = False
-                            breakeven_triggered = False
-
-                            pos_pct = round((basis / current_equity) * 100, 2)
-                            actual_risk_pct = round((per_share_risk * pos / current_equity) * 100, 2)
-
-                            # [v8.1 Patch 3]: 记录这笔交易开仓时实际承担的总风险金额，供后续R倍数计算使用
-                            current_risk_amt = per_share_risk * pos
-
-                            trades.append({
-                                "日期": date,
-                                "操作": "买入",
-                                "原因": p.get("buy_mode", "买入信号"),
-                                "成交价": real_fill_price,
-                                "净盈亏": None,
-                                "仓位占比%": pos_pct,
-                                "实际风险占比%": actual_risk_pct,
-                                "风险金额": current_risk_amt,
-                            })
-
-        current_equity = cash + (pos * row.Close if pos > 0 else 0)
-        curve.append({"Date": date, "Equity": current_equity, "Benchmark": initial * (row.Close / benchmark_entry)})
-
-    eq = pd.DataFrame(curve).set_index("Date")
-    ledger = pd.DataFrame(trades)
-    sells = [t["净盈亏"] for t in trades if t["操作"] == "卖出" and t["净盈亏"] is not None]
-    final = float(eq.Equity.iloc[-1])
-
-    # [任务I & v8.1 Patch 3]: 期望值 Expectancy 与胜率，基于每笔交易实际风险算出的R倍数序列
-    r_multiples = [t["R倍数"] for t in trades if t["操作"] == "卖出" and "R倍数" in t]
-    r_wins = [r for r in r_multiples if r > 0]
-    r_losses = [abs(r) for r in r_multiples if r < 0]
-    win_rate = (len(r_wins) / len(r_multiples)) if r_multiples else 0.0
-
-    avg_win_r = (sum(r_wins) / len(r_wins)) if r_wins else 0.0
-    avg_loss_r = (sum(r_losses) / len(r_losses)) if r_losses else 0.0
-    expectancy_r = (sum(r_multiples) / len(r_multiples)) if r_multiples else 0.0
-
-    metrics = {
-        "期望值 (R)": expectancy_r,
-        "胜率%": win_rate * 100.0,
-        "平均盈利 (R)": avg_win_r,
-        "平均亏损 (R)": avg_loss_r,
-        "最终资产": final,
-        "收益率%": (final / initial - 1) * 100,
-        "买入持有%": (eq.Benchmark.iloc[-1] / initial - 1) * 100,
-        "最大回撤%": float((eq.Equity / eq.Equity.cummax() - 1).min() * 100),
-        "已平仓笔数": len(sells),
-    }
-    return metrics, eq, ledger
 
 
 # [任务E]: 多标的真实共享资金池组合回测引擎
-def simulate_portfolio(data_dict, cfg=None, initial=100000.0, start=None):
+
+
+# Backend adapters retain all original UI function names and result keys.
+
+
+# === Self-contained mathematical engine (no local module imports) ===
+"""Auditable daily-bar long-only research engine. No brokerage integration."""
+from pathlib import Path
+from dataclasses import dataclass
+import math
+import numpy as np
+import pandas as pd
+
+ROOT = Path(__file__).resolve().parent
+
+
+
+
+@dataclass(frozen=True)
+class Settings:
+    risk_pct: float=0.3
+    max_position_pct: float=15.
+    slots: int=5
+    fee_bps: float=5.
+    slip_bps: float=5.
+    rr: float=2.5
+    partial: float=0.5
+    be_r: float=1.
+    min_score: int=75
+    max_atr_pct: float=10.
+    min_dollar_volume: float=10_000_000.
+    min_price: float=2.
+    execution: str='limit'
+
+@dataclass(frozen=True)
+class ExitRules:
+    # Zero activation preserves the previously audited trailing behavior exactly.
+    trail_activate_r: float=0.
+    chandelier_atr: float=3.2
+    max_holding_bars: int=0
+
+
+def wilder_exact(s,n=14):
+    a=s.to_numpy(dtype=float); out=np.full(len(a),np.nan)
+    for i in range(n-1,len(a)):
+        if np.isfinite(a[i-n+1:i+1]).all():
+            out[i]=np.mean(a[i-n+1:i+1]); break
+    else: return pd.Series(out,index=s.index)
+    for j in range(i+1,len(a)):
+        if np.isfinite(a[j]): out[j]=(out[j-1]*(n-1)+a[j])/n
+    return pd.Series(out,index=s.index)
+
+def features(frame,benchmark):
+    d=_base_indicators(frame,benchmark)
+    delta=d.Close.diff(); gain=wilder_exact(delta.clip(lower=0)); loss=wilder_exact(-delta.clip(upper=0))
+    d['ATR']=wilder_exact(d.TR)
+    d['ATRpct']=100*d.ATR/d.Close
+    d['RSI']=100-100/(1+gain/loss.replace(0,np.nan))
+    d.loc[(loss==0)&(gain>0),'RSI']=100.
+    d.loc[(loss==0)&(gain==0),'RSI']=50.
+    # Disjoint intervals: RSI=50 and RSI=65 must never score twice.
+    d['ScoreRSI']=np.select([d.RSI.between(50,65),(d.RSI.ge(40)&d.RSI.lt(50))|(d.RSI.gt(65)&d.RSI.le(72))],[20,10],default=0)
+    d['Score']=d.ScoreTrend+d.ScoreMACD+d.ScoreRSI+d.ScoreVol
+    if benchmark is None or benchmark.empty:
+        d['MarketOK']=np.nan; d['Relative63']=np.nan
+    d['PriorHigh20']=d.High.shift(1).rolling(20).max()
+    d['PrevHigh']=d.High.shift(1)
+    d['PrevClose']=d.Close.shift(1)
+    d['PrevEMA10']=d.EMA10.shift(1)
+    d['Slope50']=d.MA50-d.MA50.shift(20)
+    d['PullbackTouch']=((d.Low-d.EMA20)/d.ATR).rolling(5).min()
+    d['ExtensionATR']=(d.Close-d.EMA20)/d.ATR
+    return d
+
+def signals(d,model='baseline',cfg=Settings()):
+    valid=np.isfinite(d[['ATR','MA200','RSI','Relative63','MarketOK']]).all(axis=1)
+    common=valid & d.MarketOK.eq(1) & d.Close.ge(d.MA200) & d.Close.ge(cfg.min_price) & d.DollarVolume.ge(cfg.min_dollar_volume) & d.ATRpct.le(cfg.max_atr_pct)
+    if model=='baseline':
+        eligible=common & d.Score.ge(cfg.min_score) & d.VolRatio.gt(.9)
+        mode=cfg.execution
+    else:
+        trend=common & d.MA50.gt(d.MA200) & d.Slope50.gt(0) & d.EMA10.gt(d.EMA20) & d.Relative63.gt(0) & d.RSI.between(45,70) & d.ExtensionATR.between(0,2)
+        if model=='pullback': eligible=trend & d.PullbackTouch.le(.5) & d.Close.gt(d.PrevHigh) & d.Close.gt(d.EMA10)
+        elif model=='breakout': eligible=trend & d.Close.gt(d.PriorHigh20) & d.VolRatio.gt(1.2)
+        elif model=='resume': eligible=trend & d.PrevClose.le(d.PrevEMA10) & d.Close.gt(d.EMA10) & d.Close.gt(d.PrevHigh)
+        else: raise ValueError(f'Unknown model {model}')
+        mode='market'
+    entry=d.Close if mode=='market' else pd.concat([d.Close,d.EMA10],axis=1).min(axis=1)
+    stop=entry-2.8*d.ATR
+    eligible=eligible & stop.gt(0)
+    return pd.DataFrame({'eligible':eligible,'entry':entry,'stop':stop,'score':d.Score,'mode':mode},index=d.index)
+
+def wilson(wins,n):
+    if not n: return [None,None]
+    z=1.95996398454; p=wins/n; den=1+z*z/n
+    mid=(p+z*z/(2*n))/den
+    half=z*math.sqrt(p*(1-p)/n+z*z/(4*n*n))/den
+    return [100*(mid-half),100*(mid+half)]
+
+def summarize(eq,trades,initial):
+    r=np.array([t['R'] for t in trades]); pnl=np.array([t['pnl'] for t in trades])
+    n=len(r); wins=int((pnl>0).sum()); losses=float(-pnl[pnl<0].sum())
+    final=float(eq.Equity.iloc[-1]); yrs=max((eq.index[-1]-eq.index[0]).days/365.25,1/365.25)
+    returns=eq.Equity.pct_change().dropna()
+    return {'trades':n,'win_pct':100*wins/n if n else None,'win_ci95':wilson(wins,n),'expectancy_R':float(r.mean()) if n else None,
+        'avg_win_R':float(r[r>0].mean()) if (r>0).any() else None,'avg_loss_R':float(-r[r<0].mean()) if (r<0).any() else None,
+        'profit_factor':float(pnl[pnl>0].sum()/losses) if losses else None,'return_pct':100*(final/initial-1),
+        'cagr_pct':100*((final/initial)**(1/yrs)-1),'max_dd_pct':100*float((eq.Equity/eq.Equity.cummax()-1).min()),
+        'sharpe_zero_cash':float(returns.mean()/returns.std()*np.sqrt(252)) if returns.std()>0 else None,
+        'exposure_pct':100*float(eq.Exposure.mean()),'forced_exits':sum(t['reason']=='period_end' for t in trades),
+        'natural_trades':sum(t['reason']!='period_end' for t in trades),'final_equity':final}
+
+def backtest(data,start,end,model='baseline',cfg=Settings(),initial=100000.,signal_override=None,exit_rules=ExitRules()):
+    """Signals at prior close; reserve orders before intraday outcomes; all trades flattened at fixed endpoint.
+
+    Daily bars cannot identify intraday path. Stop takes precedence if both stop and
+    target are touched intraday. Intraday limit entries get no same-day target credit.
+    Missing bars preserve last mark and disable new orders on a stale signal.
     """
-    简化前提：1) 当天卖出后释放的资金，同一天内即可用于当天的新开仓（T+0 资金循环使用）；
-             2) 同一标的不在同一天内卖出又重新买入。
-    资金调度：每天对全池检查信号，按评分降序排列，优先配给高分标的，直到现金或持仓槽位上限用完。
-    """
-    # [v8.1 Patch 4]: 原注释写的是"次日可用于开仓"，与实际代码行为（当天出场后立刻更新cash、
-    # 同一天内的开仓逻辑直接使用更新后的cash）不一致，这里改成准确描述实际行为的措辞。
-    cfg = cfg or Config()
-    fee_pct = cfg.fee_bps / 1e4
-    slip_pct = cfg.slip_bps / 1e4
+    if not (0<cfg.risk_pct<=100 and 0<cfg.max_position_pct<=100 and cfg.slots>=1 and 0<=cfg.partial<=1 and cfg.rr>0): raise ValueError('invalid settings')
+    fee=cfg.fee_bps/1e4; slip=cfg.slip_bps/1e4
+    arrays={}; sigs={}; calendars={}; prev_dates={}
+    for s,d in sorted(data.items()):
+        if not d.index.is_unique or not d.index.is_monotonic_increasing: raise ValueError('dates must be sorted and unique')
+        arrays[s]={dt:row for dt,row in zip(d.index,d.to_dict('records'))}
+        sig=signals(d,model,cfg) if signal_override is None else signal_override[s]
+        sigs[s]={d.index[i]:r for i,r in enumerate(sig.to_dict('records'))}
+        prev_dates[s]={d.index[i]:d.index[i-1] for i in range(1,len(d))}
+    all_dates=sorted(set().union(*(set(d.index) for d in data.values())))
+    dates=[dt for dt in all_dates if pd.Timestamp(start)<=dt<=pd.Timestamp(end)]
+    if not dates: raise ValueError('no bars in requested dates')
+    prev_calendar={all_dates[i]:all_dates[i-1] for i in range(1,len(all_dates))}
+    cash=float(initial); positions={}; marks={}; completed=[]; events=[]; curve=[]; trade_id=0
+    before=[d for d in all_dates if d<dates[0]]
+    curve.append({'Date':before[-1] if before else dates[0]-pd.Timedelta(days=1),'Equity':initial,'Exposure':0.,'Cash':initial})
 
-    valid_series = {}
-    for s, df in data_dict.items():
-        if df is None or len(df) < 210:
-            continue
-        start_i = 210 if start is None else max(210, int(df.index.searchsorted(pd.Timestamp(start))))
-        if start_i < len(df):
-            valid_series[s] = df.iloc[start_i - 1 :]
+    def sell(s,qty,raw_price,date,reason,market=True):
+        nonlocal cash
+        p=positions[s]; fill=raw_price*(1-slip) if market else raw_price
+        proceeds=qty*fill*(1-fee); cash+=proceeds
+        p['pnl']+=proceeds-qty*p['unit_cost']; p['qty']-=qty
+        events.append({'id':p['id'],'date':str(date.date()),'symbol':s,'side':'sell','qty':qty,'fill':fill,'reason':reason})
+        if p['qty']==0:
+            completed.append({'id':p['id'],'symbol':s,'entry_date':p['entry_date'],'exit_date':str(date.date()),'entry_fill':p['fill'],'initial_qty':p['initial_qty'],'initial_risk':p['risk_total'],'pnl':p['pnl'],'R':p['pnl']/p['risk_total'],'reason':reason})
+            del positions[s]
 
-    if not valid_series:
-        raise ValueError("全池没有标的包含足够的回测历史数据")
+    for date in dates:
+        prev_eq=cash+sum(p['qty']*marks[s] for s,p in positions.items())
+        budget=cash; available=max(0,cfg.slots-len(positions)); orders=[]
+        candidates=[]
+        for s in arrays:
+            if s in positions or date not in arrays[s]: continue
+            previous=prev_dates[s].get(date)
+            if previous!=prev_calendar.get(date) or previous is None: continue
+            sig=sigs[s][previous]
+            if sig['eligible']: candidates.append((s,sig))
+        candidates.sort(key=lambda x:(-float(x[1]['score']),x[0]))
+        # All orders reserve cash and slots before knowing which limits fill.
+        for s,sig in candidates:
+            if available<=0: break
+            row=arrays[s][date]; op=float(row['Open']); limit=float(sig['entry']); stop=float(sig['stop'])
+            if op<=stop or stop<=0: continue
+            if model!='baseline' and op>limit+float(sig.get('max_gap_atr',1.))*float(arrays[s][prev_dates[s][date]]['ATR']): continue
+            is_limit=sig['mode']=='limit'; is_stop=sig['mode']=='stop'
+            reserve_fill=limit if is_limit else max(op,limit)*(1+slip) if is_stop else op*(1+slip)
+            unit_risk=reserve_fill*(1+fee)-stop*(1-slip)*(1-fee)
+            if unit_risk<=0: continue
+            qty=math.floor(min(prev_eq*cfg.risk_pct/100/unit_risk,prev_eq*cfg.max_position_pct/100/(reserve_fill*(1+fee)),budget/(reserve_fill*(1+fee))))
+            if qty<=0: continue
+            budget-=qty*reserve_fill*(1+fee); available-=1
+            orders.append((s,sig,qty))
 
-    all_dates = sorted(list(set().union(*[df.index for df in valid_series.values()])))
-    all_dates = [d for d in all_dates if d >= pd.Timestamp(start)] if start else all_dates[210:]
+        existing=set(positions)
+        for s in sorted(existing):
+            if date not in arrays[s]: continue
+            row=arrays[s][date]; p=positions[s]; op=row['Open']; stop=p['stop']
+            if op<=stop:
+                sell(s,p['qty'],op,date,'gap_stop'); continue
+            if exit_rules.max_holding_bars and p['age']>=exit_rules.max_holding_bars:
+                sell(s,p['qty'],op,date,'time_exit_next_open'); continue
+            # A known opening gap above target occurs before the later daily low.
+            if not p['tp'] and cfg.partial>0 and op>=p['target']:
+                qty=math.floor(p['qty']*cfg.partial)
+                if qty: sell(s,qty,op,date,'partial_target_open',market=False); p['tp']=True
+            if s not in positions: continue
+            if row['Low']<=stop:
+                sell(s,p['qty'],stop,date,'stop'); continue
+            if not p['tp'] and cfg.partial>0 and row['High']>=p['target']:
+                qty=math.floor(p['qty']*cfg.partial)
+                if qty: sell(s,qty,p['target'],date,'partial_target',market=False); p['tp']=True
 
-    cash = float(initial)
-    positions = {}  # symbol -> dict of pos info
-    trades = []
-    portfolio_curve = []
+        entry_intraday=set()
+        for s,sig,qty in orders:
+            row=arrays[s][date]; op=row['Open']; is_limit=sig['mode']=='limit'; is_stop=sig['mode']=='stop'; limit=sig['entry']
+            if is_limit and row['Low']>limit: continue
+            if is_stop and row['High']<limit: continue
+            intraday=(is_limit and op>limit) or (is_stop and op<limit)
+            fill=min(min(op,limit)*(1+slip),limit) if is_limit else max(op,limit)*(1+slip) if is_stop else op*(1+slip)
+            stop=float(sig['stop']); risk=fill*(1+fee)-stop*(1-slip)*(1-fee)
+            if risk<=0: continue
+            cost=qty*fill*(1+fee)
+            if cost>cash+1e-7: raise AssertionError('cash conservation failed')
+            cash-=cost; trade_id+=1
+            p={'id':trade_id,'qty':qty,'initial_qty':qty,'fill':fill,'unit_cost':fill*(1+fee),'risk_total':qty*risk,'risk_unit':risk,'stop':stop,
+               'target':(fill*(1+fee)+cfg.rr*risk)/(1-fee),'tp':False,'highest':fill,'pnl':0.,'age':0,'entry_date':str(date.date())}
+            positions[s]=p
+            events.append({'id':trade_id,'date':str(date.date()),'symbol':s,'side':'buy','qty':qty,'fill':fill,'reason':model})
+            if intraday: entry_intraday.add(s)
+            # Price must cross the lower protective stop after a long limit fill.
+            if row['Low']<=stop:
+                sell(s,qty,stop,date,'entry_day_stop'); continue
+            if not intraday and cfg.partial>0 and row['High']>=p['target']:
+                take=math.floor(qty*cfg.partial)
+                if take: sell(s,take,p['target'],date,'entry_day_partial',market=False); p['tp']=True
 
-    for date in all_dates:
-        # 1. 出场处理
-        symbols_holding = list(positions.keys())
-        for sym in symbols_holding:
-            df = valid_series[sym]
-            if date not in df.index:
-                continue
-            idx = df.index.get_loc(date)
-            row = df.iloc[idx]
-            pos_info = positions[sym]
+        for s,p in list(positions.items()):
+            if date not in arrays[s]: continue
+            row=arrays[s][date]
+            # The high of an intraday entry bar may precede its entry.
+            observed_high=max(p['fill'],row['Close']) if s in entry_intraday else row['High']
+            p['highest']=max(p['highest'],observed_high)
+            breakeven=p['unit_cost']/((1-slip)*(1-fee))
+            be=breakeven if (observed_high>=p['fill']+cfg.be_r*p['risk_unit'] or p['tp']) else p['stop']
+            p['age']+=1
+            if p['highest']>=p['fill']+exit_rules.trail_activate_r*p['risk_unit']:
+                p['stop']=max(p['stop'],be,p['highest']-exit_rules.chandelier_atr*row['ATR'],row['DonchianLow10'])
+            else:
+                p['stop']=max(p['stop'],be)
+        for s in arrays:
+            if date in arrays[s]: marks[s]=float(arrays[s][date]['Close'])
+        eq=cash+sum(p['qty']*marks[s] for s,p in positions.items())
+        curve.append({'Date':date,'Equity':eq,'Exposure':(eq-cash)/eq,'Cash':cash})
+        if cash < -1e-7: raise AssertionError('negative cash')
 
-            pos_info["highest"] = max(pos_info["highest"], float(row.High))
-            active_stop = pos_info["next_day_stop"]
-            exited_today = False
+    # Predeclared period-end liquidation; include costs and count separately.
+    for s,p in list(positions.items()): sell(s,p['qty'],marks[s],dates[-1],'period_end')
+    curve[-1]['Equity']=cash; curve[-1]['Cash']=cash; curve[-1]['Exposure']=0.
+    eq=pd.DataFrame(curve).set_index('Date')
+    if not math.isclose(initial+sum(t['pnl'] for t in completed),cash,abs_tol=1e-6): raise AssertionError('PnL does not reconcile')
+    return summarize(eq,completed,initial),eq,pd.DataFrame(completed),pd.DataFrame(events)
 
-            # [任务B.1]: 止损优先
-            if row.Low <= active_stop:
-                exited_today = True
-                raw_exit_price = min(row.Open, active_stop) if row.Open < active_stop else active_stop
-                real_exit_price = raw_exit_price * (1.0 - slip_pct)
-                proceeds = pos_info["pos"] * real_exit_price * (1.0 - fee_pct)
-                net_pnl = proceeds - pos_info["basis"]
 
-                # [v8.1 Patch 3]: 用剩余风险金额算这笔止损的R倍数
-                risk_left = pos_info.get("risk_amt", 0.0)
-                r_multiple = (net_pnl / risk_left) if risk_left > 0 else 0.0
+"""Strategy changes, not accounting changes. Fixed hypotheses frozen before results."""
+from dataclasses import replace
+import numpy as np
+import pandas as pd
 
-                trades.append({
-                    "日期": date,
-                    "代码": sym,
-                    "操作": "卖出",
-                    "原因": "🚨 止损出场",
-                    "成交价": real_exit_price,
-                    "净盈亏": net_pnl,
-                    "R倍数": r_multiple,
-                })
-                cash += proceeds
-                del positions[sym]
+SPECS={
+ 'control_market':dict(entry='baseline',mode='market',stop='atr28',rr=2.5,partial=.5,be=1.,activate=0.,holding=0),
+ 'control_pullback':dict(entry='pullback',mode='market',stop='atr28',rr=2.5,partial=.5,be=1.,activate=0.,holding=0),
+ 'structure_15':dict(entry='pullback',mode='market',stop='structure',rr=1.5,partial=.5,be=1.5,activate=1.5,holding=20),
+ 'confirm_15':dict(entry='pullback',mode='stop',stop='structure',rr=1.5,partial=.5,be=1.5,activate=1.5,holding=20),
+ 'confirm_10':dict(entry='pullback',mode='stop',stop='structure',rr=1.,partial=.5,be=1.,activate=1.,holding=20),
+ 'resume_15':dict(entry='resume',mode='stop',stop='structure',rr=1.5,partial=.5,be=1.5,activate=1.5,holding=20),
+ 'atr20_15':dict(entry='pullback',mode='market',stop='atr20',rr=1.5,partial=.5,be=1.5,activate=1.5,holding=20),
+ 'confirm_full15':dict(entry='pullback',mode='stop',stop='structure',rr=1.5,partial=1.,be=1.5,activate=1.5,holding=20)
+}
 
-            # 分批止盈
-            if (not exited_today) and (sym in positions) and (not pos_info["tp_taken"]) and (cfg.partial_tp_ratio > 0) and (row.High >= pos_info["target"]):
-                tp_shares = math.floor(pos_info["pos"] * cfg.partial_tp_ratio)
-                if tp_shares > 0:
-                    raw_tp_price = min(row.High, pos_info["target"])
-                    real_tp_price = raw_tp_price * (1.0 - slip_pct)
-                    tp_proceeds = tp_shares * real_tp_price * (1.0 - fee_pct)
-                    tp_cost_portion = pos_info["basis"] * (tp_shares / pos_info["pos"])
-                    tp_net_pnl = tp_proceeds - tp_cost_portion
+def prepare(data,name,base=Settings(),ui_overrides=False):
+    spec=SPECS[name]
+    cfg=replace(base,execution='market')
+    if not ui_overrides: cfg=replace(cfg,rr=spec['rr'],partial=spec['partial'],be_r=spec['be'])
+    exits=ExitRules(trail_activate_r=spec['activate'],max_holding_bars=spec['holding'])
+    prepared={}
+    for s,d in data.items():
+        sig=signals(d,spec['entry'],cfg)
+        sig['entry']=d.High+.1*d.ATR if spec['mode']=='stop' else d.Close
+        if spec['stop']=='structure':
+            # A structural low invalidates the pullback thesis; ATR avoids stops
+            # tighter than normal noise. Skip excessively distant support.
+            structural=d.Low.rolling(5).min()-.25*d.ATR
+            sig['stop']=np.minimum(structural,sig.entry-1.2*d.ATR)
+            sig['eligible']=sig.eligible & ((sig.entry-sig.stop)/d.ATR).le(3.)
+        else:
+            sig['stop']=sig.entry-(2.0 if spec['stop']=='atr20' else 2.8)*d.ATR
+        sig['eligible']=sig.eligible & sig.stop.gt(0)
+        sig['mode']=spec['mode']
+        sig['max_gap_atr']=.5 if spec['mode']=='stop' else 1.
+        prepared[s]=sig
+    return cfg,exits,prepared
 
-                    # [v8.1 Patch 3]: 按卖出份额比例分摊风险金额，算这笔止盈的R倍数
-                    sell_ratio = tp_shares / pos_info["pos"]
-                    sell_risk_amt = pos_info.get("risk_amt", 0.0) * sell_ratio
-                    r_multiple = (tp_net_pnl / sell_risk_amt) if sell_risk_amt > 0 else 0.0
-                    pos_info["risk_amt"] = pos_info.get("risk_amt", 0.0) - sell_risk_amt
+"""Adapters for the user's original UI: preserve function names and return schemas."""
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+import math
+import numpy as np
+import pandas as pd
+import yfinance as yf
 
-                    trades.append({
-                        "日期": date,
-                        "代码": sym,
-                        "操作": "卖出",
-                        "原因": "🎯 分批止盈",
-                        "成交价": real_tp_price,
-                        "净盈亏": tp_net_pnl,
-                        "R倍数": r_multiple,
-                    })
-                    cash += tp_proceeds
-                    pos_info["pos"] -= tp_shares
-                    pos_info["basis"] -= tp_cost_portion
-                    pos_info["tp_taken"] = True
+def settings(cfg):
+    return Settings(risk_pct=cfg.risk_pct,max_position_pct=cfg.max_position_pct,
+        slots=cfg.portfolio_max_slots,fee_bps=cfg.fee_bps,slip_bps=cfg.slip_bps,
+        rr=cfg.rr,partial=cfg.partial_tp_ratio,be_r=cfg.breakeven_trigger_r,
+        min_score=cfg.min_score,max_atr_pct=cfg.max_atr_pct,
+        min_dollar_volume=cfg.min_dollar_volume,min_price=cfg.min_price,
+        execution='market' if cfg.execution_mode.startswith('追势') else 'limit')
 
-                    if pos_info["pos"] == 0:
-                        del positions[sym]
-                        exited_today = True
+def fetch_history(symbol,period='3y'):
+    # Always exclude New York's current date, so a partially formed bar cannot
+    # accidentally masquerade as yesterday's fully available signal.
+    end=datetime.now(ZoneInfo('America/New_York')).date()
+    years=int(period[:-1]) if period.endswith('y') and period[:-1].isdigit() else 5
+    start=end-timedelta(days=365*years+400)
+    d=yf.Ticker(symbol.strip().upper()).history(start=start.isoformat(),end=end.isoformat(),auto_adjust=True,actions=False)
+    if d is None or d.empty: raise ValueError('行情为空')
+    d=d[['Open','High','Low','Close','Volume']].copy()
+    d.index=pd.DatetimeIndex(d.index).tz_localize(None).normalize()
+    if not d.index.is_unique: raise ValueError('行情日期重复')
+    d=d.sort_index()
+    if not np.isfinite(d.to_numpy()).all(): raise ValueError('行情含缺失或非有限数值')
+    if not ((d.High>=d[['Open','Close','Low']].max(axis=1)) & (d.Low<=d[['Open','Close','High']].min(axis=1)) & (d.Low>0) & (d.Volume>=0)).all(): raise ValueError('行情OHLCV关系异常')
+    if len(d)<220: raise ValueError('少于220根日线，无法完整预热')
+    return d
 
-            # 更新明日止损
-            if (sym in positions) and (not exited_today):
-                p_info = positions[sym]
-                cand_stop = active_stop
-                be_target = p_info["planned_entry"] + cfg.breakeven_trigger_r * (p_info["planned_entry"] - p_info["stop"])
-                if (not p_info["breakeven_triggered"]) and (row.High >= be_target):
-                    cand_stop = max(cand_stop, p_info["planned_entry"] * 1.001)
-                    p_info["breakeven_triggered"] = True
-                if p_info["tp_taken"]:
-                    cand_stop = max(cand_stop, p_info["planned_entry"] * 1.001)
+def indicators(frame,benchmark=None):
+    d=features(frame,benchmark)
+    d['Support5']=d.Low.rolling(5).min()
+    return d
 
-                ch_stop = p_info["highest"] - 3.2 * row.ATR
-                don_stop = float(row.DonchianLow10)
-                p_info["next_day_stop"] = max(cand_stop, ch_stop, don_stop)
+def make_plan(row,cfg):
+    needed=['Close','ATR','MA200','EMA10','EMA20','RSI','Score','DollarVolume','ATRpct','BiasMA20','Relative63','MarketOK']
+    if any(k not in row for k in needed): return None
+    if not np.isfinite(row[['Close','ATR','MA200','EMA10','EMA20','RSI','Score']].to_numpy(dtype=float)).all() or row.ATR<=0: return None
+    reasons=[]; c=settings(cfg)
+    if not np.isfinite(row.MarketOK): reasons.append('大盘数据不足，无法确认200日趋势')
+    elif row.MarketOK!=1: reasons.append('大盘未站上200日线')
+    if row.Close<row.MA200: reasons.append('个股低于200日线')
+    if row.Close<c.min_price: reasons.append('价格低于门槛')
+    if row.DollarVolume<c.min_dollar_volume: reasons.append('成交额不足')
+    if row.ATRpct>c.max_atr_pct: reasons.append('ATR波动率过高')
+    if not np.isfinite(row.Relative63): reasons.append('相对收益历史不足')
+    entry_model=SPECS[ROUND2_STRATEGY]['entry'] if ROUND2_STRATEGY else SIGNAL_MODEL
+    if entry_model=='baseline':
+        if row.Score<c.min_score: reasons.append('综合评分不足')
+        if row.VolRatio<=.9: reasons.append('量比不足0.9')
+    else:
+        checks=[(row.MA50>row.MA200,'50日线未高于200日线'),(row.Slope50>0,'50日线斜率不为正'),(row.EMA10>row.EMA20,'短期均线未多头排列'),(row.Relative63>0,'63日相对SPY收益不为正'),(45<=row.RSI<=70,'RSI不在45–70'),(0<=row.ExtensionATR<=2,'距EMA20不在0–2ATR')]
+        if entry_model=='pullback': checks.extend([(row.PullbackTouch<=.5,'近5日缺少回调触及'),(row.Close>row.PrevHigh,'未突破前日最高'),(row.Close>row.EMA10,'未站上EMA10')])
+        if entry_model=='breakout': checks.extend([(row.Close>row.PriorHigh20,'未突破前20日最高'),(row.VolRatio>1.2,'量比不足1.2')])
+        if entry_model=='resume': checks.extend([(row.PrevClose<=row.PrevEMA10,'前收盘未低于短均线'),(row.Close>row.EMA10,'未站回短均线'),(row.Close>row.PrevHigh,'未突破前日最高')])
+        reasons.extend(reason for ok,reason in checks if not ok)
+    one=row.to_frame().T
+    sig=signals(one,entry_model,c).iloc[0]
+    entry=float(sig.entry); stop=float(sig.stop)
+    if ROUND2_STRATEGY:
+        spec=SPECS[ROUND2_STRATEGY]
+        entry=float(row.High+.1*row.ATR) if spec['mode']=='stop' else float(row.Close)
+        if spec['stop']=='structure':
+            stop=min(float(row.Support5-.25*row.ATR),entry-1.2*row.ATR)
+            if not np.isfinite(stop) or (entry-stop)/row.ATR>3:
+                sig.eligible=False; reasons.append('结构支撑过远或缺失：风险距离须不超过3ATR')
+        else: stop=entry-(2.0 if spec['stop']=='atr20' else 2.8)*row.ATR
+        sig['mode']=spec['mode']
+    if stop<=0: reasons.append('初始止损价格非正')
+    fee=c.fee_bps/1e4; slip=c.slip_bps/1e4
+    risk=entry-stop
+    net_risk=entry*(1+fee)-stop*(1-slip)*(1-fee)
+    target=(entry*(1+fee)+c.rr*net_risk)/(1-fee)
+    if not bool(sig.eligible) and not reasons: reasons.append('未满足完整指标有效性或入场条件')
+    return {'entry':entry,'stop':stop,'target':target,'risk':risk,'eligible':bool(sig.eligible),
+        'reasons':reasons,'score':int(row.Score),'score_breakdown':{'趋势分':int(row.ScoreTrend),'MACD分':int(row.ScoreMACD),'RSI分':int(row.ScoreRSI),'量能分':int(row.ScoreVol),'总分':int(row.Score)},
+        'buy_mode':'次日突破触发价（未突破不入场）' if sig['mode']=='stop' else '次日开盘参考（成交前需重算风险）' if sig['mode']=='market' else '次日限价参考',
+        'atr_pct':float(row.ATRpct),'relative63':float(row.Relative63),'bias_warning':bool(row.BiasMA20>cfg.max_bias_pct),'bias_val':float(row.BiasMA20)}
 
-        # 当前组合总资产评估
-        current_eq = cash
-        for sym, p_info in positions.items():
-            df = valid_series[sym]
-            if date in df.index:
-                current_eq += p_info["pos"] * df.loc[date, "Close"]
+def translate(m):
+    return {'期望值 (R)':m['expectancy_R'] or 0.,'胜率%':m['win_pct'] or 0.,
+        '平均盈利 (R)':m['avg_win_R'] or 0.,'平均亏损 (R)':m['avg_loss_R'] or 0.,
+        '最终资产':m['final_equity'],'收益率%':m['return_pct'],'最大回撤%':m['max_dd_pct'],
+        '已平仓笔数':m['trades'],'期末结算笔数':m['forced_exits'],'利润因子':m['profit_factor'],
+        '胜率95%区间':m['win_ci95'],'平均资金投入%':m['exposure_pct']}
 
-        # 2. 开仓检查
-        candidate_buys = []
-        if len(positions) < cfg.portfolio_max_slots:
-            for sym, df in valid_series.items():
-                if sym in positions or date not in df.index:
-                    continue
-                idx = df.index.get_loc(date)
-                if idx == 0:
-                    continue
-                prev_row = df.iloc[idx - 1]
-                curr_row = df.iloc[idx]
+def ledger_for_ui(trades):
+    return trades.rename(columns={'id':'交易ID','symbol':'代码','entry_date':'开仓日期','exit_date':'平仓日期','entry_fill':'买入成交价','initial_qty':'开仓股数','initial_risk':'初始风险金额','pnl':'完整交易净盈亏','R':'完整交易R','reason':'最终退出原因'})
 
-                p = plan(prev_row, cfg)
-                if p and p["eligible"] and prev_row.VolRatio > 0.9:
-                    candidate_buys.append({
-                        "symbol": sym,
-                        "plan": p,
-                        "score": p["score"],
-                        "curr_row": curr_row,
-                    })
+def install(namespace):
+    Config=namespace['Config']
+    original_cfg_from_session=namespace['cfg_from_session']
+    def cfg_from_session():
+        cfg=original_cfg_from_session()
+        if ROUND2_STRATEGY: cfg.execution_mode='确认突破条件入场（研究）' if SPECS[ROUND2_STRATEGY]['mode']=='stop' else '追势模式 (Market)'
+        return cfg
+    def run_engine(data,start,end,cfg,initial):
+        if ROUND2_STRATEGY:
+            c,exits,sig=prepare(data,ROUND2_STRATEGY,settings(cfg),ui_overrides=True)
+            return backtest(data,start,end,ROUND2_STRATEGY,c,initial,signal_override=sig,exit_rules=exits)
+        return backtest(data,start,end,SIGNAL_MODEL,settings(cfg),initial)
+    def plan(row,cfg=None): return make_plan(row,cfg or Config())
+    def simulate(d,cfg=None,initial=10000.,start=None):
+        cfg=cfg or Config()
+        if len(d)<221: raise ValueError('预热数据不足')
+        actual_start=start or str(d.index[220].date())
+        if (d.index<pd.Timestamp(actual_start)).sum()<220: raise ValueError('回测起始日前预热不足220根，请使用更长行情')
+        m,e,t,ev=run_engine({'标的':d},actual_start,str(d.index[-1].date()),cfg,initial)
+        ix=e.index[1:]; fee=cfg.fee_bps/1e4; slip=cfg.slip_bps/1e4
+        buy=float(d.loc[ix[0],'Open'])*(1+slip)*(1+fee)
+        e['Benchmark']=initial
+        e.loc[ix,'Benchmark']=initial*d.loc[ix,'Close']/buy
+        e.loc[ix[-1],'Benchmark']*=(1-slip)*(1-fee)
+        metrics=translate(m); metrics['买入持有%']=100*(e.Benchmark.iloc[-1]/initial-1)
+        return metrics,e,ledger_for_ui(t)
+    def simulate_portfolio(data_dict,cfg=None,initial=100000.,start=None):
+        cfg=cfg or Config()
+        if not data_dict: raise ValueError('股票池没有可用数据')
+        actual_start=start or str(max(d.index[220] for d in data_dict.values()).date())
+        for sym,d in data_dict.items():
+            if (d.index<pd.Timestamp(actual_start)).sum()<220: raise ValueError(f'{sym} 回测起始日前预热不足220根')
+        end=min(d.index[-1] for d in data_dict.values())
+        m,e,t,ev=run_engine(data_dict,actual_start,str(end.date()),cfg,initial)
+        return translate(m),e,ledger_for_ui(t)
+    namespace.update({'fetch_history':fetch_history,'indicators':indicators,'plan':plan,'simulate':simulate,'simulate_portfolio':simulate_portfolio,'cfg_from_session':cfg_from_session})
 
-            # 按评分高到低排序，优先买入
-            candidate_buys.sort(key=lambda x: x["score"], reverse=True)
-
-            for cand in candidate_buys:
-                if len(positions) >= cfg.portfolio_max_slots:
-                    break
-                sym = cand["symbol"]
-                p = cand["plan"]
-                row = cand["curr_row"]
-
-                planned_target_price = p["entry"]
-                should_buy = False
-                raw_fill_price = 0.0
-
-                if cfg.execution_mode.startswith("追势"):
-                    should_buy = True
-                    raw_fill_price = float(row.Open)
-                else:
-                    if row.Low <= planned_target_price:
-                        should_buy = True
-                        raw_fill_price = min(row.Open, planned_target_price)
-
-                if should_buy:
-                    real_fill_price = raw_fill_price * (1.0 + slip_pct)
-                    stop_price = p["stop"]
-                    stop_after_slip = stop_price * (1.0 - slip_pct)
-                    per_share_risk = (real_fill_price - stop_after_slip) + fee_pct * (real_fill_price + stop_after_slip)
-
-                    if per_share_risk > 0:
-                        risk_amount = current_eq * (cfg.risk_pct / 100.0)
-                        raw_shares = risk_amount / per_share_risk
-                        max_shares_cap = (current_eq * (cfg.max_position_pct / 100.0)) / real_fill_price
-                        max_shares_cash = (cash * 0.98) / (real_fill_price * (1.0 + fee_pct))
-
-                        final_shares = math.floor(min(raw_shares, max_shares_cap, max_shares_cash))
-
-                        if final_shares > 0:
-                            basis = final_shares * real_fill_price * (1.0 + fee_pct)
-                            cash -= basis
-                            # [v8.1 Patch 3]: 记录开仓时的真实风险金额，供后续R倍数计算使用
-                            open_risk_amt = per_share_risk * final_shares
-                            positions[sym] = {
-                                "pos": final_shares,
-                                "entry_price": real_fill_price,
-                                "planned_entry": planned_target_price,
-                                "stop": stop_price,
-                                "next_day_stop": stop_price,
-                                "target": p["target"],
-                                "basis": basis,
-                                "highest": real_fill_price,
-                                "tp_taken": False,
-                                "breakeven_triggered": False,
-                                "risk_amt": open_risk_amt,
-                            }
-                            trades.append({
-                                "日期": date,
-                                "代码": sym,
-                                "操作": "买入",
-                                "原因": p["buy_mode"],
-                                "成交价": real_fill_price,
-                                "净盈亏": None,
-                                "风险金额": open_risk_amt,
-                            })
-
-        # 每日汇总记录
-        current_eq = cash
-        for sym, p_info in positions.items():
-            df = valid_series[sym]
-            if date in df.index:
-                current_eq += p_info["pos"] * df.loc[date, "Close"]
-        portfolio_curve.append({"Date": date, "Equity": current_eq})
-
-    eq = pd.DataFrame(portfolio_curve).set_index("Date")
-    ledger = pd.DataFrame(trades)
-    sells = [t["净盈亏"] for t in trades if t["操作"] == "卖出" and t["净盈亏"] is not None]
-    final = float(eq.Equity.iloc[-1]) if not eq.empty else initial
-
-    # [任务I & v8.1 Patch 3]: 组合层面同样改用基于实际风险金额的R倍数序列
-    r_multiples = [t["R倍数"] for t in trades if t["操作"] == "卖出" and "R倍数" in t]
-    r_wins = [r for r in r_multiples if r > 0]
-    r_losses = [abs(r) for r in r_multiples if r < 0]
-    win_rate = (len(r_wins) / len(r_multiples)) if r_multiples else 0.0
-    avg_win_r = (sum(r_wins) / len(r_wins)) if r_wins else 0.0
-    avg_loss_r = (sum(r_losses) / len(r_losses)) if r_losses else 0.0
-    expectancy_r = (sum(r_multiples) / len(r_multiples)) if r_multiples else 0.0
-
-    metrics = {
-        "期望值 (R)": expectancy_r,
-        "胜率%": win_rate * 100.0,
-        "平均盈利 (R)": avg_win_r,
-        "平均亏损 (R)": avg_loss_r,
-        "最终资产": final,
-        "收益率%": (final / initial - 1) * 100,
-        "最大回撤%": float((eq.Equity / eq.Equity.cummax() - 1).min() * 100) if not eq.empty else 0.0,
-        "已平仓笔数": len(sells),
-    }
-    return metrics, eq, ledger
+install(globals())
 
 
 # -----------------------------------------------------------------------------
@@ -1251,7 +1116,7 @@ if app_mode == "🚀 自动扫描 & 智能推荐":
             custom_pool_str = st.text_input("扫描代码", value=", ".join(pool_target))
     with c3:
         st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-        run_scan = st.button("⚡ 启动高胜率模型扫描", use_container_width=True)
+        run_scan = st.button("⚡ 启动模型扫描", use_container_width=True)
 
     if run_scan:
         symbols = parse_symbols(custom_pool_str)[:500]
@@ -1360,7 +1225,7 @@ elif app_mode == "🔍 单标的全量诊断":
                 st.dataframe(df_sb, use_container_width=True, hide_index=True)
 
         # [任务F.3]: 醒目免责声明
-        st.caption("⚠️ **免责声明**：评分是基于固定技术指标矩阵规则打分，不是历史胜率，也不代表未来一定盈利。股市有风险，入市需谨慎。")
+        st.caption("⚠️ **免责声明**：评分是固定规则分数，不是获利概率。新入场候选尚未证明稳定优于基线；回测按完整交易统计并包含期末结算。")
 
         diag = sig["tech_diag"]
         st.markdown(
@@ -1425,7 +1290,7 @@ elif app_mode == "🧪 策略历史回测引擎":
                     + metric_card("最大回撤%", f"{metrics['最大回撤%']:.2f}%", "metric-stop")
                 )
                 st.markdown(f"<div style='display:grid;grid-template-columns:repeat(5,1fr);gap:10px'>{html_bt_cards}</div>", unsafe_allow_html=True)
-                st.caption("💡 *以上基于历史数据回测，不代表未来一定重现。*")
+                st.caption("💡 *按完整交易统计，分批卖出不重复计笔；包含期末结算与交易成本。历史结果不代表未来。*")
 
                 fig_eq = go.Figure()
                 fig_eq.add_trace(go.Scatter(x=eq.index, y=eq.Equity, name=f"Quantum 策略 ({cfg.execution_mode})", line=dict(color="#00f0ff", width=2)))
@@ -1499,7 +1364,7 @@ elif app_mode == "🧪 策略历史回测引擎":
                         + metric_card("组合最大回撤%", f"{p_metrics['最大回撤%']:.2f}%", "metric-stop")
                     )
                     st.markdown(f"<div style='display:grid;grid-template-columns:repeat(4,1fr);gap:10px'>{html_p_cards}</div>", unsafe_allow_html=True)
-                    st.caption("💡 *组合回测：10万初始资金共享池，按评分优先分配最多持仓槽位。*")
+                    st.caption("💡 *组合回测：10万共享资金；按完整交易统计，含期末结算与费用。按前收盘权益预留资金和槽位。*")
 
                     fig_peq = go.Figure()
                     fig_peq.add_trace(go.Scatter(x=p_eq.index, y=p_eq.Equity, name="全池组合净值", line=dict(color="#00f0ff", width=2)))
