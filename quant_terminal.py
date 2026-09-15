@@ -1,8 +1,8 @@
-"""QuantumSignal V2 — frozen-rule, long-only daily research terminal.
+"""QuantumSignal V2 — 规则固定、仅做多的日线研究终端。
 
-Deploy this file and requirements.txt. Importing it never starts the UI.
-Adjusted OHLC represents synthetic investment units, not broker share records.
-All orders are fixed from the previous close; no history-dependent optimization.
+部署本文件及 requirements.txt。导入本文件不会启动用户界面。
+复权 OHLC 表示合成投资单位，并非券商实际股份记录。
+所有订单均根据前一收盘时点确定；不进行依赖历史数据的优化。
 """
 from __future__ import annotations
 
@@ -52,31 +52,31 @@ class Config:
 
     def validate(self):
         if self.preset not in ("Balanced", "Conservative", "Aggressive"):
-            raise ValueError("Unknown preset")
+            raise ValueError("未知预设")
         if not 0 < self.max_exposure <= 1:
-            raise ValueError("Maximum exposure must be in (0, 1]")
+            raise ValueError("最大仓位必须在 (0, 1] 范围内")
         if not 0 <= self.dd_start < self.dd_full < 1:
-            raise ValueError("Invalid drawdown thresholds")
+            raise ValueError("回撤阈值无效")
         for value in (self.vol_discount, self.dd_discount, self.bull_retention,
                       self.emergency_cap, self.no_trade):
             if not 0 <= value <= 1:
-                raise ValueError("Invalid risk parameter")
+                raise ValueError("风险参数无效")
         if min(self.risk_on, self.risk_off, self.dd_recovery) <= 0:
-            raise ValueError("Transition speeds must be positive")
+            raise ValueError("仓位调整速度必须为正数")
         if min(self.structure_scale, self.momentum_scale, self.slope_scale) <= 0:
-            raise ValueError("Feature scales must be positive")
+            raise ValueError("特征缩放参数必须为正数")
         if min(self.long_window, self.momentum_window) < 2:
-            raise ValueError("Feature windows must be at least two")
+            raise ValueError("特征窗口必须至少为 2")
         if min(self.regime_confirm, self.healthy_confirm) < 1:
-            raise ValueError("Confirmations must be positive")
+            raise ValueError("确认次数必须为正数")
         if not (-1 < self.shock_day < 0 and -1 < self.shock_five < 0):
-            raise ValueError("Shock thresholds must be negative returns")
+            raise ValueError("冲击阈值必须为负收益率")
         if self.shock_ratio <= 0 or self.shock_absolute <= 0:
-            raise ValueError("Shock scales must be positive")
+            raise ValueError("冲击尺度必须为正数")
         if min(self.commission_bps, self.spread_bps, self.slippage_bps) < 0:
-            raise ValueError("Costs cannot be negative")
+            raise ValueError("交易成本不能为负数")
         if max(self.commission_bps, self.spread_bps, self.slippage_bps) >= 1000:
-            raise ValueError("Costs outside supported research range")
+            raise ValueError("交易成本超出支持的研究范围")
 
 
 def preset_config(name="Balanced"):
@@ -91,7 +91,7 @@ def preset_config(name="Balanced"):
                       risk_on=.15, risk_off=.10, emergency_cap=.25,
                       dd_recovery=.03)
     if name != "Balanced":
-        raise ValueError("Unknown preset")
+        raise ValueError("未知预设")
     return Config()
 
 
@@ -132,26 +132,26 @@ def variants():
 def validate_frame(frame):
     required = ["Open", "High", "Low", "Close", "Volume"]
     if not set(required).issubset(frame.columns):
-        raise ValueError("OHLCV columns required")
+        raise ValueError("必须包含 OHLCV 列")
     d = frame[required].copy().astype(float)
     d.index = pd.DatetimeIndex(d.index)
     if d.index.tz is not None:
         d.index = d.index.tz_localize(None)
     d.index = d.index.normalize()
     if d.empty or not d.index.is_unique or not d.index.is_monotonic_increasing:
-        raise ValueError("Dates must be nonempty, unique and sorted")
+        raise ValueError("日期不能为空，且必须唯一并按顺序排列")
     if not np.isfinite(d.to_numpy()).all():
-        raise ValueError("Missing or nonfinite OHLCV; no silent price filling")
+        raise ValueError("OHLCV 存在缺失值或非有限值；不会自动填补价格")
     valid = ((d.Low > 0) & (d.Volume >= 0)
              & (d.High >= d[["Open", "Close", "Low"]].max(axis=1))
              & (d.Low <= d[["Open", "Close", "High"]].min(axis=1)))
     if not valid.all():
-        raise ValueError("Invalid OHLCV relationships")
+        raise ValueError("OHLCV 数据关系无效")
     return d
 
 
 def features(frame, cfg=Config(), variant=Variant()):
-    """Only trailing operations. Volatility never normalizes trend evidence."""
+    """仅使用向后看的历史运算。波动率绝不用于归一化趋势证据。"""
     d = validate_frame(frame)
     p = d.Close
     d["MA200"] = p.rolling(cfg.long_window).mean()
@@ -162,7 +162,7 @@ def features(frame, cfg=Config(), variant=Variant()):
     d["uL"] = (d.L / cfg.structure_scale).clip(-1, 1)
     d["uM"] = (d.M / cfg.momentum_scale).clip(-1, 1)
     d["uS"] = (d.S / cfg.slope_scale).clip(-1, 1)
-    # Deletion tests remove the component from scores AND its eligibility gates.
+    # 删除测试同时移除该组件的评分贡献及其资格判定条件。
     wm, ws = (.25 if variant.momentum else 0), (.25 if variant.slope else 0)
     d["T"] = (.5*d.uL + wm*d.uM + ws*d.uS) / (.5+wm+ws)
     r = np.log(p / p.shift(1))
@@ -266,12 +266,12 @@ class AssetState:
 
 
 def make_decisions(rows, states, dd_state, equity, budgets, cfg, variant):
-    """One call per close, including the pre-start close. No fill data enters here."""
+    """每次收盘调用一次，包括开始日期前的收盘时点。此处不接收成交数据。"""
     for s, row in rows.items():
         states[s].update_emergency(row, variant.emergency and variant.kind == "continuous")
     recovering = all(r['T'] > 0 and r.Return20 > 0 and r.NoNewLow for r in rows.values())
     any_emergency = any(s.emergency for s in states.values())
-    # A conservative shared-account recovery gate: all budgeted assets must recover.
+    # 保守的共享账户恢复条件：所有分配了预算的资产都必须恢复。
     penalty = dd_state.update(equity, recovering, any_emergency, cfg) if variant.drawdown and variant.kind == "continuous" else 0.
     severe = dd_state.mode == "Defensive" and 1-equity/dd_state.peak >= cfg.dd_full
     out = {}
@@ -319,11 +319,11 @@ def make_decisions(rows, states, dd_state, equity, budgets, cfg, variant):
                       VolPenalty=pv, DrawdownStandalone=base*penalty*a,
                       FloorActive=bool(floor), EmergencyAge=state.age,
                       EmergencyCalmDays=state.calm,
-                      Explanation=(f"{row.Regime}: trend base {base*a:.1%}; "
-                                   f"volatility penalty {pv:.1%}, drawdown penalty {penalty:.1%} "
-                                   f"(maximum, not compounded); bull protection {'active' if floor else 'inactive'}; "
-                                   f"{'Emergency cap' if state.emergency else 'Risk-On' if desired > old else 'Normal Risk-Off'}; "
-                                   f"next target {target*a:.1%}."))
+                      Explanation=(f"{row.Regime}：趋势基础仓位 {base*a:.1%}; "
+                                   f"波动率惩罚 {pv:.1%}，回撤惩罚 {penalty:.1%} "
+                                   f"（取最大值，不连乘）；牛市参与保护{'已启用' if floor else '未启用'}; "
+                                   f"{'紧急防守上限' if state.emergency else '加仓' if desired > old else '常规减仓'}; "
+                                   f"下次目标仓位 {target*a:.1%}."))
     return out
 
 
@@ -349,35 +349,35 @@ def _fingerprint(data):
 
 def backtest(data, cfg=Config(), variant=Variant(), start=None, end=None,
              initial=10000., budgets=None, frozen_decisions=None, unlimited_on=False):
-    """Strict common calendar, fractional adjusted units, fixed prior-close orders.
+    """严格使用共同交易日历、可分割复权单位及前一收盘时点确定的订单。
 
-    Missing sessions reject the run rather than inventing marks or executions.
-    frozen_decisions enables a paired diagnostic with risk-policy feedback frozen.
+    缺少交易日时拒绝运行，不虚构估值或成交。
+    frozen_decisions 用于配对诊断，并固定风险策略反馈。
     """
     cfg.validate()
     if not data or initial <= 0 or not np.isfinite(initial):
-        raise ValueError("Data and positive finite capital required")
+        raise ValueError("必须提供数据及正的有限初始资金")
     data = {s: validate_frame(d) for s, d in sorted(data.items())}
     symbols = list(data)
     calendar = data[symbols[0]].index
     for s in symbols[1:]:
         if not calendar.equals(data[s].index):
-            raise ValueError("Asset calendars differ. Supply a complete shared calendar; no silent alignment.")
+            raise ValueError("资产交易日历不一致。请提供完整且一致的交易日历；不会自动对齐。")
     budgets = dict(budgets) if budgets is not None else {s: 1/len(symbols) for s in symbols}
     if set(budgets) != set(symbols) or any(not np.isfinite(v) or v <= 0 for v in budgets.values()) or sum(budgets.values()) > 1+1e-12:
-        raise ValueError("Positive asset budgets must sum to at most one")
+        raise ValueError("各资产预算必须为正数，且总和不得超过 1")
     feats = {s: features(d, cfg, variant) for s, d in data.items()}
     ready = np.logical_and.reduce([f.Ready.to_numpy() for f in feats.values()])
     eligible = np.flatnonzero(np.r_[False, ready[:-1]])
     if not len(eligible):
-        raise ValueError("Insufficient warmup; at least 273 daily bars required")
+        raise ValueError("预热数据不足；至少需要 273 根日线")
     first = pd.Timestamp(start) if start is not None else calendar[eligible[0]]
     last = pd.Timestamp(end) if end is not None else calendar[-1]
     ids = np.flatnonzero((calendar >= first) & (calendar <= last))
     if not len(ids) or ids[0] == 0 or not ready[ids[0]-1]:
-        raise ValueError("Requested start lacks full prior-close warmup")
+        raise ValueError("指定开始日期之前的收盘数据不足以完成预热")
     if len(ids) < 2:
-        raise ValueError("At least two trading days required")
+        raise ValueError("至少需要两个交易日")
     states = {s: AssetState() for s in symbols}
     dd = DrawdownState(initial)
     qty = {s: 0. for s in symbols}
@@ -424,7 +424,7 @@ def backtest(data, cfg=Config(), variant=Variant(), start=None, end=None,
                 delta = 0.
             else:
                 wanted = plan["Target"]*equity/float(row.Close)
-                # Estimate purchase costs at the known close, never increase size at open.
+                # 根据已知收盘价估算买入成本，绝不在开盘时增加交易数量。
                 if wanted > qty[s]:
                     wanted = qty[s]+(wanted-qty[s])/((1+impact)*(1+fee))
                 delta = max(-qty[s], wanted-qty[s])
@@ -493,15 +493,15 @@ def backtest(data, cfg=Config(), variant=Variant(), start=None, end=None,
             if orders[s] > 0:
                 execute(s, orders[s]*scale, scale)
         if cash < -1e-7 or any(q < -1e-10 for q in qty.values()):
-            raise AssertionError("Cash or quantity conservation failed")
+            raise AssertionError("现金或持仓数量守恒校验失败")
         cash = max(0., cash)
         values = {s: qty[s]*float(data[s].Close.iloc[k]) for s in symbols}
         equity = cash+sum(values.values())
         unrealized = sum(values[s]-cost_basis[s] for s in symbols)
         if not np.isclose(equity, initial+realized+unrealized, atol=1e-6, rtol=1e-10):
-            raise AssertionError("Realized + unrealized PnL does not reconcile")
+            raise AssertionError("已实现盈亏与未实现盈亏之和无法对账")
         if equity <= 0:
-            raise AssertionError("Nonpositive equity")
+            raise AssertionError("账户净值非正")
         hist.append(dict(Date=date, Equity=equity, Cash=cash,
                          PositionValue=sum(values.values()), Exposure=sum(values.values())/equity,
                          Commission=daily_fee, SpreadCost=daily_spread, SlippageCost=daily_slip,
@@ -561,10 +561,10 @@ def metrics(result, benchmark=None):
     if benchmark is not None:
         bh = benchmark.history.reindex(h.index)
         if bh.Equity.isna().any():
-            raise ValueError("Benchmark dates must match")
+            raise ValueError("基准日期必须一致")
         pair = pd.DataFrame({"Q": h.Return.iloc[1:], "B": bh.Return.iloc[1:]})
         monthly = pair.groupby(pair.index.to_period("M")).apply(lambda z: (1+z).prod()-1)
-        # Boundary months can be partial. Conservatively omit both from captures.
+        # 首尾月份可能不完整。为保守起见，计算捕获率时将两者均剔除。
         monthly = monthly.iloc[1:-1]
         for label, mask in (("Upside", monthly.B > 0), ("Downside", monthly.B < 0)):
             subset = monthly.loc[mask]
@@ -610,7 +610,7 @@ def participation_diagnostics(result, cfg=Config()):
 
 
 def regime_diagnostics(result, benchmark):
-    """Contiguous prior-close regime episodes; never concatenate disjoint drawdowns."""
+    """基于前一收盘时点划分连续市场状态区间；绝不拼接不相连区间的回撤。"""
     if result.decisions.Symbol.nunique() != 1:
         return pd.DataFrame()
     labels = result.decisions.set_index("Date").Regime
@@ -631,10 +631,10 @@ def regime_diagnostics(result, benchmark):
 
 
 def recovery_diagnostic(data, full, benchmark, cfg=Config()):
-    """Descriptive ex-post V windows; replay changes only the upward speed limit.
+    """用于描述的事后 V 型窗口；重放仅改变加仓速度限制。
 
-    Trend, risk penalties, floor and Emergency paths are frozen to the original.
-    This is a paired attribution experiment, not an independently investable policy.
+    趋势、风险惩罚、参与下限及紧急防守路径均固定为原始路径。
+    这是配对归因实验，并非可独立用于投资的策略。
     """
     shadow = backtest(data, cfg, start=full.metadata["start"], end=full.metadata["end"],
                       initial=full.metadata["initial"], budgets=full.metadata["budgets"],
@@ -664,35 +664,35 @@ def recovery_diagnostic(data, full, benchmark, cfg=Config()):
 
 
 def sensitivity(data, cfg=Config(), start=None, end=None, initial=10000.):
-    """Fixed one-at-a-time experiments, grouped by lagged volatility profiles."""
-    settings = [("Frozen", cfg)]
+    """固定的单因素实验，按滞后波动率分组。"""
+    settings = [("固定规则", cfg)]
     for threshold in (-.06, -.08, -.12, -.15):
-        settings.append((f"Single-day shock {threshold:.0%}", replace(cfg, shock_day=threshold)))
+        settings.append((f"单日冲击 {threshold:.0%}", replace(cfg, shock_day=threshold)))
     for threshold in (-.05, -.12):
-        settings.append((f"Five-day shock {threshold:.0%}", replace(cfg, shock_five=threshold)))
+        settings.append((f"五日冲击 {threshold:.0%}", replace(cfg, shock_five=threshold)))
     for threshold in (1.5, 2.1):
-        settings.append((f"Shock ratio {threshold}", replace(cfg, shock_ratio=threshold)))
+        settings.append((f"波动冲击比率 {threshold}", replace(cfg, shock_ratio=threshold)))
     for threshold in (.20, .40):
-        settings.append((f"Shock absolute {threshold:.0%}", replace(cfg, shock_absolute=threshold)))
+        settings.append((f"波动冲击绝对值 {threshold:.0%}", replace(cfg, shock_absolute=threshold)))
     for window in (150, 250):
-        settings.append((f"Long trend {window}", replace(cfg, long_window=window)))
+        settings.append((f"长期趋势窗口 {window}", replace(cfg, long_window=window)))
     for window in (84, 168):
-        settings.append((f"Momentum {window}", replace(cfg, momentum_window=window)))
+        settings.append((f"动量窗口 {window}", replace(cfg, momentum_window=window)))
     for factor in (.75, 1.25):
-        settings.append((f"Feature scales x{factor}", replace(cfg, structure_scale=cfg.structure_scale*factor,
+        settings.append((f"特征尺度 x{factor}", replace(cfg, structure_scale=cfg.structure_scale*factor,
                          momentum_scale=cfg.momentum_scale*factor, slope_scale=cfg.slope_scale*factor)))
     for count in (2, 5):
-        settings.append((f"Regime confirmation {count}", replace(cfg, regime_confirm=count)))
+        settings.append((f"市场状态确认次数 {count}", replace(cfg, regime_confirm=count)))
     for count in (3, 10):
-        settings.append((f"Healthy confirmation {count}", replace(cfg, healthy_confirm=count)))
+        settings.append((f"健康市场确认次数 {count}", replace(cfg, healthy_confirm=count)))
     for factor in (.75, 1.25):
-        settings.append((f"Risk-On speed x{factor}", replace(cfg, risk_on=cfg.risk_on*factor)))
-        settings.append((f"Risk-Off speed x{factor}", replace(cfg, risk_off=cfg.risk_off*factor)))
-        settings.append((f"Drawdown recovery x{factor}", replace(cfg, dd_recovery=cfg.dd_recovery*factor)))
+        settings.append((f"加仓速度 x{factor}", replace(cfg, risk_on=cfg.risk_on*factor)))
+        settings.append((f"减仓速度 x{factor}", replace(cfg, risk_off=cfg.risk_off*factor)))
+        settings.append((f"回撤保护解除速度 x{factor}", replace(cfg, dd_recovery=cfg.dd_recovery*factor)))
     for band in (.01, .03):
-        settings.append((f"No-trade band {band:.0%}", replace(cfg, no_trade=band)))
+        settings.append((f"不交易区间 {band:.0%}", replace(cfg, no_trade=band)))
     for cost in (2, 3):
-        settings.append((f"Costs x{cost}", replace(cfg, commission_bps=cfg.commission_bps*cost,
+        settings.append((f"成本 x{cost}", replace(cfg, commission_bps=cfg.commission_bps*cost,
                         spread_bps=cfg.spread_bps*cost, slippage_bps=cfg.slippage_bps*cost)))
     records = []
     for symbol, frame in data.items():
@@ -703,8 +703,8 @@ def sensitivity(data, cfg=Config(), start=None, end=None, initial=10000.):
             record["EmergencyTriggers"] = int(r.decisions.Trigger.sum())
             record["EmergencyDays"] = int(r.decisions.Emergency.sum())
             records.append(record)
-            # Threshold bands are descriptive, not optimized or used by the policy.
-            for low, high, label in ((0, .20, "Low <20%"), (.20, .40, "Medium 20–40%"), (.40, np.inf, "High >=40%")):
+            # 阈值分组仅用于描述，不进行优化，也不用于策略决策。
+            for low, high, label in ((0, .20, "低波动 <20%"), (.20, .40, "中波动 20–40%"), (.40, np.inf, "高波动 >=40%")):
                 g = r.decisions.loc[(r.decisions.Sigma >= low) & (r.decisions.Sigma < high)]
                 records.append(dict(Symbol=symbol, Experiment=name, VolatilityProfile=label,
                                     Days=len(g), EmergencyTriggers=int(g.Trigger.sum()),
@@ -714,7 +714,7 @@ def sensitivity(data, cfg=Config(), start=None, end=None, initial=10000.):
 
 
 def demo_data(symbols=("DEMO",), periods=1600, seed=17):
-    """Deterministic synthetic paths only. Never presented as historical prices."""
+    """仅生成确定性的合成路径。绝不将其展示为历史价格。"""
     rng = np.random.default_rng(seed)
     index = pd.bdate_range("2018-01-02", periods=periods)
     data = {}
@@ -745,7 +745,7 @@ def export_bundle(result, tables=None):
 
 
 def period_diagnostics(result, benchmark):
-    """Continuous frozen-policy calendar-year evaluation; no annual parameter refit."""
+    """固定策略下按自然年连续评估；不逐年重新拟合参数。"""
     rows = []
     dates = result.history.index[1:]
     for year in sorted(set(dates.year)):
@@ -763,14 +763,14 @@ def period_diagnostics(result, benchmark):
 
 
 def chronological_diagnostics(result, benchmark):
-    """60/20/20 reporting boundaries, continuous holdings and no rule fitting.
+    """按 60/20/20 划分报告区间，持仓连续，不拟合规则。
 
-    These names do not certify that the last interval was actually unseen.
+    这些名称并不证明最后一个区间此前确实未被查看。
     """
     dates = result.history.index[1:]
     bounds = (0, int(.6*len(dates)), int(.8*len(dates)), len(dates))
     output = []
-    for label, begin, finish in zip(("Research 60%", "Validation 20%", "Final interval 20%"), bounds[:-1], bounds[1:]):
+    for label, begin, finish in zip(("研究区间 60%", "验证区间 20%", "最终区间 20%"), bounds[:-1], bounds[1:]):
         if finish-begin < 2: continue
         ix = result.history.index[begin:finish+1]
         def cut(r):
@@ -783,7 +783,7 @@ def chronological_diagnostics(result, benchmark):
             cycles = r.cycles.loc[(r.cycles.ExitDate >= ix[1]) & (r.cycles.ExitDate <= ix[-1])] if len(r.cycles) else r.cycles
             return replace(r, history=h, fills=fills, cycles=cycles)
         stats = metrics(cut(result), cut(benchmark))
-        # Trade-cycle summaries can span boundaries, so leave them out of this table.
+        # 交易周期汇总可能跨越区间边界，因此不纳入此表。
         keep = ("TotalReturn", "CAGR", "MaxDrawdown", "Volatility", "Sharpe", "Sortino", "Calmar",
                 "UpsideCapture", "DownsideCapture", "AverageExposure", "Turnover", "TransactionCosts")
         output.append(dict(Interval=label, Start=ix[1], End=ix[-1], **{k: stats[k] for k in keep}))
@@ -796,18 +796,18 @@ def load_csv_files(files):
         raw = pd.read_csv(BytesIO(content))
         lookup = {str(c).lower(): c for c in raw.columns}
         if "date" not in lookup:
-            raise ValueError(f"{name}: Date column required")
+            raise ValueError(f"{name}：必须包含 Date 列")
         rename = {lookup[k.lower()]: k for k in ("Date", "Open", "High", "Low", "Close", "Volume") if k.lower() in lookup}
         if "symbol" in lookup: rename[lookup["symbol"]] = "Symbol"
         raw = raw.rename(columns=rename)
         if "Symbol" not in raw:
             raw["Symbol"] = name.rsplit(".", 1)[0].upper()
         for symbol, group in raw.groupby("Symbol"):
-            if symbol in data: raise ValueError(f"Duplicate symbol: {symbol}")
+            if symbol in data: raise ValueError(f"标的代码重复：{symbol}")
             group = group.copy()
             group["Date"] = pd.to_datetime(group.Date, errors="raise")
             data[str(symbol)] = validate_frame(group.set_index("Date"))
-    if not data: raise ValueError("Upload at least one OHLCV CSV")
+    if not data: raise ValueError("请至少上传一个 OHLCV CSV 文件")
     return data
 
 
@@ -818,7 +818,7 @@ def download_history(symbols, start, end):
         d = yf.Ticker(symbol).history(start=str(start), end=str(end), auto_adjust=True,
                                       actions=False, raise_errors=True, timeout=15)
         if d is None or d.empty:
-            raise ValueError(f"No data for {symbol}; try an adjusted OHLCV CSV")
+            raise ValueError(f"没有 {symbol} 的数据；请尝试上传复权 OHLCV CSV 文件")
         data[symbol] = validate_frame(d)
     return data
 
@@ -829,13 +829,13 @@ def chart_dashboard(result, benchmark):
     h, b = result.history, benchmark.history
     fig = make_subplots(rows=4, cols=1, shared_xaxes=True,
                         row_heights=[.45, .20, .25, .10], vertical_spacing=.04,
-                        subplot_titles=("Net equity", "Drawdown", "Market exposure", "Prior-close market state"))
+                        subplot_titles=("账户净值", "回撤", "市场仓位", "前一收盘时点的市场状态"))
     fig.add_trace(go.Scatter(x=h.index, y=h.Equity, name="Quantum", line=dict(color="#52d6c7", width=2)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=b.index, y=b.Equity, name="Buy & Hold", line=dict(color="#a6b3cc", width=1.5)), row=1, col=1)
-    for frame, name, color in ((h, "Quantum DD", "#52d6c7"), (b, "Benchmark DD", "#a6b3cc")):
+    fig.add_trace(go.Scatter(x=b.index, y=b.Equity, name="买入并持有", line=dict(color="#a6b3cc", width=1.5)), row=1, col=1)
+    for frame, name, color in ((h, "Quantum 回撤", "#52d6c7"), (b, "基准回撤", "#a6b3cc")):
         fig.add_trace(go.Scatter(x=frame.index, y=frame.Drawdown, name=name, line=dict(color=color), showlegend=False), row=2, col=1)
-    fig.add_trace(go.Scatter(x=h.index, y=h.Exposure, name="Actual exposure", fill="tozeroy", line=dict(color="#52d6c7")), row=3, col=1)
-    fig.add_trace(go.Scatter(x=h.index, y=h.Target, name="Execution target", line=dict(color="#e8bf79", dash="dot")), row=3, col=1)
+    fig.add_trace(go.Scatter(x=h.index, y=h.Exposure, name="实际仓位", fill="tozeroy", line=dict(color="#52d6c7")), row=3, col=1)
+    fig.add_trace(go.Scatter(x=h.index, y=h.Target, name="执行目标仓位", line=dict(color="#e8bf79", dash="dot")), row=3, col=1)
     states = result.decisions.pivot(index="Symbol", columns="Date", values="Regime")
     code = states.replace({"Bear": -1, "Neutral": 0, "Bull": 1})
     fig.add_trace(go.Heatmap(x=code.columns, y=code.index, z=code.to_numpy(dtype=float),
@@ -856,7 +856,7 @@ def formatted_metrics(table):
     formats = {c: "{:.1%}" for c in pct if c in table.columns}
     formats.update({c: "{:.2f}" for c in ("Sharpe", "Sortino", "Calmar", "ProfitFactor", "Turnover") if c in table.columns})
     if "TransactionCosts" in table: formats["TransactionCosts"] = "{:,.2f}"
-    return table.style.format(formats, na_rep="N/A")
+    return table.style.format(formats, na_rep="不适用").format_index(lambda label: {"A Buy & Hold": "A 买入并持有", "B SMA200": "B SMA200 趋势", "C Continuous": "C 连续仓位", "D C + Volatility": "D C + 波动率修正", "E C + Drawdown": "E C + 回撤保护", "F Full V2": "F 完整 V2", "F − Volatility": "F − 波动率修正", "F − Drawdown": "F − 回撤保护", "F − Participation floor": "F − 参与下限", "F − Emergency": "F − 紧急防守", "F − Regime memory": "F − 市场状态记忆", "C − Momentum": "C − 动量", "C − Slope": "C − 斜率", "Quantum": "Quantum", "Buy & Hold": "买入并持有"}.get(label, label), axis=0)
 
 
 def main():
@@ -874,29 +874,29 @@ def main():
     h1,h2,h3 {letter-spacing:-.025em}
     </style>""", unsafe_allow_html=True)
     st.title("QuantumSignal V2")
-    st.caption("ADAPTIVE TREND PARTICIPATION · FROZEN RULES · LONG ONLY · NO LEVERAGE")
+    st.caption("自适应趋势参与 · 固定规则 · 仅做多 · 无杠杆")
     with st.sidebar:
-        st.header("Research configuration")
-        source = st.selectbox("Data source", ["Synthetic demo", "Yahoo adjusted daily data", "Upload adjusted OHLCV CSV"])
-        name = st.selectbox("Risk preset", ["Balanced", "Conservative", "Aggressive"])
+        st.header("研究配置")
+        source = st.selectbox("数据来源", ["Synthetic demo", "Yahoo adjusted daily data", "Upload adjusted OHLCV CSV"], format_func={"Synthetic demo": "合成数据演示", "Yahoo adjusted daily data": "Yahoo 复权日线数据", "Upload adjusted OHLCV CSV": "上传复权 OHLCV CSV"}.get)
+        name = st.selectbox("风险预设", ["Balanced", "Conservative", "Aggressive"], format_func={"Balanced": "均衡", "Conservative": "保守", "Aggressive": "积极"}.get)
         cfg = preset_config(name)
-        capital = st.number_input("Initial capital", min_value=100., value=10000., step=1000.)
-        symbols_text = st.text_input("Symbols / demo profiles", "DEMO" if source == "Synthetic demo" else "SPY")
+        capital = st.number_input("初始资金", min_value=100., value=10000., step=1000.)
+        symbols_text = st.text_input("标的代码 / 演示配置", "DEMO" if source == "Synthetic demo" else "SPY")
         if source == "Synthetic demo":
-            st.caption("Use DEMO, MEDIUM, HIGH to inspect different synthetic volatility profiles.")
+            st.caption("使用 DEMO、MEDIUM、HIGH 查看不同的合成波动率情景。")
         today = datetime.now(ZoneInfo("America/New_York")).date()
         default_start = pd.Timestamp("2019-03-01").date() if source == "Synthetic demo" else today-timedelta(days=365*5)
-        start_date = st.date_input("Backtest start", default_start)
-        end_date = st.date_input("Backtest end", pd.Timestamp("2024-02-16").date() if source == "Synthetic demo" else today-timedelta(days=1))
-        uploads = st.file_uploader("Adjusted OHLCV files", type="csv", accept_multiple_files=True) if source == "Upload adjusted OHLCV CSV" else []
-        with st.expander("Execution assumptions"):
-            fee = st.number_input("Commission per side (bps)", 0., 100., cfg.commission_bps)
-            spread = st.number_input("Full bid–ask spread (bps)", 0., 100., cfg.spread_bps)
-            slip = st.number_input("Additional slippage per side (bps)", 0., 100., cfg.slippage_bps)
+        start_date = st.date_input("回测开始日期", default_start)
+        end_date = st.date_input("回测结束日期", pd.Timestamp("2024-02-16").date() if source == "Synthetic demo" else today-timedelta(days=1))
+        uploads = st.file_uploader("复权 OHLCV 文件", type="csv", accept_multiple_files=True) if source == "Upload adjusted OHLCV CSV" else []
+        with st.expander("执行假设"):
+            fee = st.number_input("单边佣金（基点）", 0., 100., cfg.commission_bps)
+            spread = st.number_input("完整买卖价差（基点）", 0., 100., cfg.spread_bps)
+            slip = st.number_input("单边额外滑点（基点）", 0., 100., cfg.slippage_bps)
             cfg = replace(cfg, commission_bps=fee, spread_bps=spread, slippage_bps=slip)
-            st.caption("Fixed prior-close units; next-open execution. Cash shortfalls reduce buys. Fractional adjusted research units. Zero cash yield. No forced endpoint sale.")
-        st.caption("Strategy parameters are frozen. Sensitivity experiments do not change the selected strategy.")
-        run = st.button("Run research", type="primary", width="stretch")
+            st.caption("根据前一收盘价确定交易单位数，在下一开盘时执行。现金不足时缩减买入量。使用可分割的复权研究单位。现金收益率为零。回测结束时不强制卖出。")
+        st.caption("策略参数固定。敏感性实验不会改变所选策略。")
+        run = st.button("运行研究", type="primary", width="stretch")
     symbols = list(dict.fromkeys(s.strip().upper() for s in symbols_text.replace(" ", ",").split(",") if s.strip()))
     signature = json.dumps(dict(source=source, cfg=asdict(cfg), capital=capital, symbols=symbols,
                                 start=str(start_date), end=str(end_date),
@@ -904,10 +904,10 @@ def main():
     cached = st.session_state.get("research")
     if run or (cached is None and source == "Synthetic demo"):
         try:
-            if not symbols and source != "Upload adjusted OHLCV CSV": raise ValueError("Enter at least one symbol")
-            if len(symbols) > 12: raise ValueError("Limit each interactive run to 12 assets")
-            if end_date <= start_date: raise ValueError("End date must follow start date")
-            with st.spinner("Validating data and running the accounting engine…"):
+            if not symbols and source != "Upload adjusted OHLCV CSV": raise ValueError("请至少输入一个标的代码")
+            if len(symbols) > 12: raise ValueError("每次交互运行最多支持 12 个资产")
+            if end_date <= start_date: raise ValueError("结束日期必须晚于开始日期")
+            with st.spinner("正在校验数据并运行记账引擎…"):
                 if source == "Synthetic demo":
                     data = demo_data(tuple(symbols))
                 elif source == "Upload adjusted OHLCV CSV":
@@ -926,49 +926,49 @@ def main():
                               cfg=cfg, source=source)
                 st.session_state.research = cached
         except Exception as exc:
-            st.error(f"Research run could not complete: {exc}")
-            st.info("For CSV input use Date, Open, High, Low, Close, Volume; optional Symbol. Supply at least 280 pre-start sessions and identical complete calendars for a portfolio.")
+            st.error(f"研究运行未能完成：{exc}")
+            st.info("CSV 输入请使用 Date、Open、High、Low、Close、Volume 列；Symbol 列可选。请提供开始日期之前至少 280 个交易日的数据；投资组合中各资产的交易日历必须完整且一致。")
     if cached is None:
-        st.info("Choose a data source and run the research engine.")
+        st.info("请选择数据来源并运行研究引擎。")
         return
     if cached["signature"] != signature:
-        st.warning("Settings changed. Results below still belong to the previous run; select Run research to apply changes.")
+        st.warning("设置已更改。下方仍显示上一次运行的结果；请点击“运行研究”应用更改。")
     result, benchmark, cfg = cached["result"], cached["benchmark"], cached["cfg"]
     data = cached["data"]
     if cached["source"] == "Synthetic demo":
-        st.info("SYNTHETIC DEMO — generated paths for testing behavior. These are not historical market returns or evidence of investment performance.")
+        st.info("合成数据演示——使用生成的价格路径测试系统行为。这些结果不是历史市场收益，也不是投资表现的证据。")
     meta = result.metadata
-    st.caption(f"{meta['config']['preset']} · {meta['start']} → {meta['end']} · {', '.join(data)} · Data fingerprint {meta['data_sha256'][:12]} · {VERSION}")
-    page = st.radio("Workspace", ["Overview", "Strategy", "Backtest", "Diagnostics", "Settings"], horizontal=True, label_visibility="collapsed")
+    st.caption(f"{meta['config']['preset']} · {meta['start']} → {meta['end']} · {', '.join(data)} · 数据指纹 {meta['data_sha256'][:12]} · {VERSION}")
+    page = st.radio("工作区", ["Overview", "Strategy", "Backtest", "Diagnostics", "Settings"], horizontal=True, label_visibility="collapsed", format_func={"Overview": "总览", "Strategy": "策略", "Backtest": "回测", "Diagnostics": "诊断", "Settings": "设置"}.get)
     m, bm = metrics(result, benchmark), metrics(benchmark, benchmark)
     h, nxt = result.history, result.next_decision
     if page == "Overview":
         c = st.columns(4)
         regimes = " / ".join(nxt.Regime.unique())
-        c[0].metric("Market state", regimes)
-        c[1].metric("Next execution target", f"{nxt.Target.astype(float).sum():.1%}")
-        c[2].metric("Actual exposure", f"{h.Exposure.iloc[-1]:.1%}")
-        c[3].metric("Current drawdown", f"{h.Drawdown.iloc[-1]:.1%}")
+        c[0].metric("市场状态", regimes)
+        c[1].metric("下次执行目标仓位", f"{nxt.Target.astype(float).sum():.1%}")
+        c[2].metric("实际仓位", f"{h.Exposure.iloc[-1]:.1%}")
+        c[3].metric("当前回撤", f"{h.Drawdown.iloc[-1]:.1%}")
         c = st.columns(4)
-        c[0].metric("Net equity", f"{h.Equity.iloc[-1]:,.2f}")
-        c[1].metric("Return vs Buy & Hold", f"{m['TotalReturn']-bm['TotalReturn']:+.1%}")
-        c[2].metric("Cash", f"{h.Cash.iloc[-1]/h.Equity.iloc[-1]:.1%}")
-        risk = "EMERGENCY" if nxt.Emergency.any() else "Drawdown protection" if nxt.DDPenalty.astype(float).max() > 0 else "Normal"
-        c[3].metric("Risk state", risk)
-        st.caption("Targets use the last completed close and are for the next trading session. Actual exposure is the simulated account, not a connected brokerage account.")
+        c[0].metric("账户净值", f"{h.Equity.iloc[-1]:,.2f}")
+        c[1].metric("相对买入并持有的收益差", f"{m['TotalReturn']-bm['TotalReturn']:+.1%}")
+        c[2].metric("现金", f"{h.Cash.iloc[-1]/h.Equity.iloc[-1]:.1%}")
+        risk = "紧急防守" if nxt.Emergency.any() else "回撤保护" if nxt.DDPenalty.astype(float).max() > 0 else "正常"
+        c[3].metric("风险状态", risk)
+        st.caption("目标仓位基于最近一个已完成交易日的收盘数据，用于下一交易日。实际仓位来自模拟账户，并非已连接的券商账户。")
         st.plotly_chart(chart_dashboard(result, benchmark), width="stretch")
         last = result.decisions.groupby("Symbol", sort=False).tail(2)
-        st.subheader("Recent decisions")
-        st.dataframe(last[["SignalDate", "Symbol", "Regime", "Base", "Desired", "Target", "Emergency", "DDMode"]], hide_index=True, width="stretch")
+        st.subheader("近期决策")
+        st.dataframe(last[["SignalDate", "Symbol", "Regime", "Base", "Desired", "Target", "Emergency", "DDMode"]], hide_index=True, width="stretch", column_config={"SignalDate": "信号日期", "Symbol": "标的", "Regime": "市场状态", "Base": "基础仓位", "Desired": "期望仓位", "Target": "目标仓位", "Emergency": "紧急防守", "DDMode": "回撤保护状态"})
         warnings = cached["participation"]
-        if warnings.ConstraintViolation.any(): st.error("Participation constraint violation detected. Inspect Diagnostics before relying on this result.")
-        elif warnings.groupby("Symbol").tail(1).Warning.any(): st.warning("PARTICIPATION WARNING — exposure remains below its attainable healthy-bull range.")
+        if warnings.ConstraintViolation.any(): st.error("检测到违反参与约束的情况。使用此结果前请查看“诊断”。")
+        elif warnings.groupby("Symbol").tail(1).Warning.any(): st.warning("参与度警告——仓位持续低于健康牛市中可达到的仓位范围。")
     elif page == "Strategy":
-        st.subheader("Why this exposure?")
-        symbol = st.selectbox("Asset", list(data))
+        st.subheader("为什么是这个仓位？")
+        symbol = st.selectbox("资产", list(data))
         p = nxt.loc[symbol]
         budget = meta["budgets"][symbol]
-        labels = ["Capital ceiling", "Trend deterioration", "Volatility", "Drawdown (incremental)", "Bull protection", "Normal transition", "Emergency", "Final target"]
+        labels = ["资金仓位上限", "趋势转弱", "波动率", "回撤保护（增量）", "牛市参与保护", "常规仓位过渡", "紧急防守", "最终目标仓位"]
         vals = [cfg.max_exposure*budget, -float(p.TrendReduction), -float(p.VolReduction),
                 -float(p.DrawdownReduction), float(p.FloorCredit), float(p.TransitionEffect),
                 -float(p.EmergencyReduction), float(p.Target)]
@@ -976,101 +976,101 @@ def main():
                                     increasing=dict(marker=dict(color="#52d6c7")), decreasing=dict(marker=dict(color="#e17e87"))))
         fig.update_layout(template="plotly_dark", height=430, yaxis_tickformat=".0%", showlegend=False)
         st.plotly_chart(fig, width="stretch")
-        st.caption("Exact additive bridge to the target. Volatility is shown first; drawdown contributes only the excess under max(volatility, drawdown). The standalone penalties are shown below, so a binding drawdown overlay is not hidden by ordering.")
-        st.dataframe(nxt, width="stretch")
-        st.markdown("""**Five questions, five answers**
+        st.caption("通过精确的加减分解展示目标仓位的形成过程。先展示波动率影响；在 max(波动率惩罚, 回撤惩罚) 规则下，回撤仅贡献超出波动率惩罚的部分。下方列出各自独立的惩罚幅度，避免实际起约束作用的回撤保护因展示顺序而被掩盖。")
+        st.dataframe(nxt, width="stretch", column_config={"Date": "日期", "SignalDate": "信号日期", "Symbol": "标的", "Regime": "市场状态", "Base": "基础仓位", "Desired": "期望仓位", "Target": "目标仓位", "Emergency": "紧急防守", "DDMode": "回撤保护状态", "TrendReduction": "趋势减仓", "VolReduction": "波动率减仓", "DrawdownReduction": "回撤削减幅度", "FloorCredit": "参与下限补回仓位", "TransitionEffect": "仓位过渡影响", "EmergencyReduction": "紧急防守减仓", "Healthy": "健康牛市资格", "AttainableFloor": "可达到的参与下限", "DDPenalty": "回撤惩罚", "VolPenalty": "波动率惩罚", "DrawdownStandalone": "独立回撤减仓幅度", "FloorActive": "参与下限已启用", "EmergencyAge": "紧急防守持续天数", "EmergencyCalmDays": "紧急防守平静天数", "Explanation": "决策说明", "Trend": "趋势分数", "Sigma": "年化波动率", "Days": "交易日数", "QuantumReturn": "Quantum 收益率", "BenchmarkReturn": "基准收益率", "QuantumDD": "Quantum 回撤", "BenchmarkDD": "基准回撤", "Year": "年份", "Exposure": "实际仓位", "Shortfall": "仓位缺口", "Warning": "参与度警告", "Trough": "低点日期", "RecoveryEnd": "恢复结束日期", "PrecedingDecline": "此前跌幅", "BenchmarkRecovery": "基准恢复收益率", "QuantumRecovery": "Quantum 恢复收益率", "UnlimitedOnReplay": "取消加仓限速的重放收益率", "RiskOnMissedReturn": "加仓限速错失收益率", "Event": "事件", "StructureBreak": "结构破坏", "Shock": "波动冲击", "Return1": "单日收益率", "Return5": "五日收益率", "Commission": "佣金", "SpreadCost": "价差成本", "SlippageCost": "滑点成本", "Cost": "总成本", "Structure": "结构证据", "Momentum": "动量证据", "Slope": "斜率证据", "VolRatio": "波动率比值", "Trigger": "紧急防守触发", "PriorExposure": "前一收盘仓位", "OrderUnits": "订单单位数", "ClosePrice": "收盘价", "Budget": "资金预算占比", "ConstraintViolation": "参与约束违规", "Side": "交易方向", "Units": "单位数", "ReferencePrice": "参考价格", "FillPrice": "成交价格", "CashAfter": "成交后现金", "CashScale": "现金缩放系数", "Reason": "成交原因", "EntryDate": "入场日期", "ExitDate": "退出日期", "PnL": "盈亏", "HoldingDays": "持仓天数", "Experiment": "实验", "EmergencyTriggers": "紧急防守触发次数", "EmergencyDays": "紧急防守天数", "VolatilityProfile": "波动率分组", "AverageTarget": "平均目标仓位"})
+        st.markdown("""**五个问题，五个答案**
 
-- **Trend:** structure, six-month momentum and trend slope determine the base allocation.
-- **Volatility:** only an unusual increase relative to its own trailing norm reduces exposure, by at most 20% in Balanced.
-- **Drawdown:** the shared account protects against loss expansion, with recovery before a new equity high.
-- **Participation:** a qualified healthy bull retains at least 85% of base exposure before transition timing.
-- **Emergency:** severe structure plus shock/loss evidence overrides the normal speed limit.
+- **趋势：**结构、六个月动量及趋势斜率决定基础仓位。
+- **波动率：**仅在相对自身历史正常水平异常上升时降低仓位；Balanced 下最多削减基础仓位的 20%。
+- **回撤：**共享账户防止亏损扩大，无需净值创新高即可开始恢复。
+- **参与度：**符合条件的健康牛市中，在考虑仓位过渡速度前，至少保留基础仓位的 85%。
+- **紧急防守：**严重结构破坏叠加冲击或亏损证据时，绕过常规速度限制。
 
-Trend components are related price evidence, not independent probabilities. Emergency conditions are different risk dimensions, not statistically independent observations.
+趋势组件是相互关联的价格证据，并非独立概率。紧急防守条件代表不同风险维度，并非统计上独立的观测。
 """)
-        with st.expander("Frozen equations"):
+        with st.expander("固定公式"):
             st.latex(r"T=0.50\,clip(L/0.08)+0.25\,clip(M/0.15)+0.25\,clip(S/0.02)")
             st.latex(r"B=E_{max}(3x^2-2x^3),\quad x=clip((T+h+1)/2,0,1)")
-            st.latex(r"R=B[1-\max(p_{vol},p_{dd})],\quad R\ge0.85B\;\text{only when qualified}")
-            st.write("L = log(price / SMA200); M = log(price / price126); S = log(SMA100 / SMA100 twenty sessions ago). Evidence clip is [-1, 1].")
+            st.latex(r"R=B[1-\max(p_{vol},p_{dd})],\quad R\ge0.85B\;\text{仅在符合条件时}")
+            st.write("L = log(价格 / SMA200)；M = log(价格 / 126 个交易日前的价格)；S = log(SMA100 / 20 个交易日前的 SMA100)。趋势证据的截断范围为 [-1, 1]。")
     elif page == "Backtest":
         st.plotly_chart(chart_dashboard(result, benchmark), width="stretch")
         table = pd.DataFrame({"Quantum": m, "Buy & Hold": bm}).T
-        st.dataframe(formatted_metrics(table), width="stretch")
+        st.dataframe(formatted_metrics(table), width="stretch", column_config={"TotalReturn": "总收益率", "CAGR": "年化复合增长率", "MaxDrawdown": "最大回撤", "Volatility": "波动率", "Sharpe": "夏普比率", "Sortino": "索提诺比率", "Calmar": "卡玛比率", "AverageExposure": "平均仓位", "TimeInMarket": "持仓时间占比", "Turnover": "换手率", "TransactionCosts": "交易成本", "Fills": "成交笔数", "ClosedCycles": "已结束周期数", "OpenCycles": "未结束周期数", "WinRate": "胜率", "ProfitFactor": "盈利因子", "AverageHoldingDays": "平均持仓天数", "UpsideCapture": "上涨捕获率", "DownsideCapture": "下跌捕获率", "UpMonths": "上涨月份数", "DownMonths": "下跌月份数", "DrawdownReduction": "回撤削减幅度", "ComparedWith": "对照模型", "Interval": "区间", "Start": "开始日期", "End": "结束日期"})
         c = st.columns(3)
-        c[0].metric("Gross strategy return", f"{metrics(cached['gross'])['TotalReturn']:.1%}")
-        c[1].metric("Transaction costs", f"{h.Cost.sum():,.2f}")
-        c[2].metric("Net strategy return", f"{m['TotalReturn']:.1%}")
-        st.caption("Gross is a separate zero-cost simulation; compounding and account feedback can differ. Open positions remain marked to market. Captures use arithmetic complete-month means, omit boundary months and require three observations per sign. Turnover is annualized two-sided notional / equity, not halved.")
-        st.subheader("Risk / participation exchange")
+        c[0].metric("策略毛收益率", f"{metrics(cached['gross'])['TotalReturn']:.1%}")
+        c[1].metric("交易成本", f"{h.Cost.sum():,.2f}")
+        c[2].metric("策略净收益率", f"{m['TotalReturn']:.1%}")
+        st.caption("毛收益来自单独的零成本模拟；复利与账户反馈可能不同。未平仓持仓继续按市价计值。捕获率使用完整月份收益的算术平均值，剔除首尾月份，上涨和下跌月份各需至少三个观测值。换手率为年化双边名义交易额 / 净值，不除以二。")
+        st.subheader("风险与市场参与的权衡")
         c = st.columns(3)
-        c[0].metric("CAGR sacrificed", f"{bm['CAGR']-m['CAGR']:+.1%}")
-        c[1].metric("Drawdown improvement", f"{abs(bm['MaxDrawdown'])-abs(m['MaxDrawdown']):+.1%}")
-        c[2].metric("Upside capture", f"{m['UpsideCapture']:.1%}" if np.isfinite(m['UpsideCapture']) else "N/A")
-        st.subheader("Continuous regime episodes")
+        c[0].metric("牺牲的年化复合增长率", f"{bm['CAGR']-m['CAGR']:+.1%}")
+        c[1].metric("回撤改善", f"{abs(bm['MaxDrawdown'])-abs(m['MaxDrawdown']):+.1%}")
+        c[2].metric("上涨捕获率", f"{m['UpsideCapture']:.1%}" if np.isfinite(m['UpsideCapture']) else "不适用")
+        st.subheader("连续市场状态区间")
         reg = regime_diagnostics(result, benchmark)
-        if len(reg): st.dataframe(reg, hide_index=True, width="stretch")
-        else: st.info("For portfolios, each asset's prior-close state is in the exposure history. Portfolio return is not assigned to a single asset's regime.")
-        st.subheader("Calendar-year stability — frozen policy, no refit")
-        st.dataframe(period_diagnostics(result, benchmark), hide_index=True, width="stretch")
-        st.subheader("Chronological validation boundaries")
-        st.dataframe(formatted_metrics(chronological_diagnostics(result, benchmark)), hide_index=True, width="stretch")
-        st.caption("60/20/20 intervals with continuous holdings and frozen rules. The final interval is genuinely held out only if it was not used in prior design decisions. Viewing it now consumes that holdout; no automatic refitting occurs.")
+        if len(reg): st.dataframe(reg, hide_index=True, width="stretch", column_config={"Year": "年份", "Start": "开始日期", "End": "结束日期", "Regime": "市场状态", "Days": "交易日数", "QuantumReturn": "Quantum 收益率", "BenchmarkReturn": "基准收益率", "QuantumDD": "Quantum 回撤", "BenchmarkDD": "基准回撤", "AverageExposure": "平均仓位", "Turnover": "换手率", "TransactionCosts": "交易成本"})
+        else: st.info("对于投资组合，各资产前一收盘时点的市场状态记录在仓位历史中。组合收益不归属于某个单一资产的市场状态。")
+        st.subheader("年度稳定性——策略固定，不重新拟合")
+        st.dataframe(period_diagnostics(result, benchmark), hide_index=True, width="stretch", column_config={"Year": "年份", "Start": "开始日期", "End": "结束日期", "Regime": "市场状态", "Days": "交易日数", "QuantumReturn": "Quantum 收益率", "BenchmarkReturn": "基准收益率", "QuantumDD": "Quantum 回撤", "BenchmarkDD": "基准回撤", "AverageExposure": "平均仓位", "Turnover": "换手率", "TransactionCosts": "交易成本"})
+        st.subheader("按时间顺序划分的验证区间")
+        st.dataframe(formatted_metrics(chronological_diagnostics(result, benchmark)), hide_index=True, width="stretch", column_config={"TotalReturn": "总收益率", "CAGR": "年化复合增长率", "MaxDrawdown": "最大回撤", "Volatility": "波动率", "Sharpe": "夏普比率", "Sortino": "索提诺比率", "Calmar": "卡玛比率", "AverageExposure": "平均仓位", "TimeInMarket": "持仓时间占比", "Turnover": "换手率", "TransactionCosts": "交易成本", "Fills": "成交笔数", "ClosedCycles": "已结束周期数", "OpenCycles": "未结束周期数", "WinRate": "胜率", "ProfitFactor": "盈利因子", "AverageHoldingDays": "平均持仓天数", "UpsideCapture": "上涨捕获率", "DownsideCapture": "下跌捕获率", "UpMonths": "上涨月份数", "DownMonths": "下跌月份数", "DrawdownReduction": "回撤削减幅度", "ComparedWith": "对照模型", "Interval": "区间", "Start": "开始日期", "End": "结束日期"})
+        st.caption("按 60/20/20 划分区间，持仓连续且规则固定。只有最后一个区间未用于先前的设计决策时，它才是真正的留出区间。现在查看它将消耗这次留出验证机会；系统不会自动重新拟合。")
     elif page == "Diagnostics":
-        tab1, tab2, tab3, tab4 = st.tabs(["Ablation", "Participation & recovery", "Events & accounting", "Sensitivity"])
+        tab1, tab2, tab3, tab4 = st.tabs(["消融测试", "参与度与恢复", "事件与记账", "敏感性分析"])
         with tab1:
-            st.write("Identical data, dates, budgets, execution and costs. No automatic model selection.")
-            if st.button("Run A–F and component deletion tests"):
-                with st.spinner("Running the frozen comparison set…"):
+            st.write("使用相同的数据、日期、预算、执行方式和成本。不会自动选择模型。")
+            if st.button("运行 A–F 对照与组件删除测试"):
+                with st.spinner("正在运行固定对照组…"):
                     table, delta, _ = run_ablation(data, cfg, meta["start"], meta["end"], meta["initial"])
                     cached["ablation"], cached["delta"] = table, delta
             if "ablation" in cached:
-                st.dataframe(formatted_metrics(cached["ablation"]), width="stretch")
-                st.subheader("Incremental differences")
-                st.dataframe(formatted_metrics(cached["delta"]), width="stretch")
-                st.caption("Deletion deltas are deletion minus full/reference. Removing an evidence component removes its score and its eligibility gates. No test automatically changes the deployed model.")
+                st.dataframe(formatted_metrics(cached["ablation"]), width="stretch", column_config={"TotalReturn": "总收益率", "CAGR": "年化复合增长率", "MaxDrawdown": "最大回撤", "Volatility": "波动率", "Sharpe": "夏普比率", "Sortino": "索提诺比率", "Calmar": "卡玛比率", "AverageExposure": "平均仓位", "TimeInMarket": "持仓时间占比", "Turnover": "换手率", "TransactionCosts": "交易成本", "Fills": "成交笔数", "ClosedCycles": "已结束周期数", "OpenCycles": "未结束周期数", "WinRate": "胜率", "ProfitFactor": "盈利因子", "AverageHoldingDays": "平均持仓天数", "UpsideCapture": "上涨捕获率", "DownsideCapture": "下跌捕获率", "UpMonths": "上涨月份数", "DownMonths": "下跌月份数", "DrawdownReduction": "回撤削减幅度", "ComparedWith": "对照模型", "Interval": "区间", "Start": "开始日期", "End": "结束日期"})
+                st.subheader("增量差异")
+                st.dataframe(formatted_metrics(cached["delta"]), width="stretch", column_config={"TotalReturn": "总收益率", "CAGR": "年化复合增长率", "MaxDrawdown": "最大回撤", "Volatility": "波动率", "Sharpe": "夏普比率", "Sortino": "索提诺比率", "Calmar": "卡玛比率", "AverageExposure": "平均仓位", "TimeInMarket": "持仓时间占比", "Turnover": "换手率", "TransactionCosts": "交易成本", "Fills": "成交笔数", "ClosedCycles": "已结束周期数", "OpenCycles": "未结束周期数", "WinRate": "胜率", "ProfitFactor": "盈利因子", "AverageHoldingDays": "平均持仓天数", "UpsideCapture": "上涨捕获率", "DownsideCapture": "下跌捕获率", "UpMonths": "上涨月份数", "DownMonths": "下跌月份数", "DrawdownReduction": "回撤削减幅度", "ComparedWith": "对照模型", "Interval": "区间", "Start": "开始日期", "End": "结束日期"})
+                st.caption("删除测试的差异等于删除组件后的结果减去完整模型或参考模型的结果。删除趋势证据组件时，同时移除其评分贡献及资格判定条件。任何测试都不会自动更改已部署的模型。")
         with tab2:
-            st.subheader("Participation contract")
+            st.subheader("参与度约束")
             d = cached["participation"]
-            st.write(f"{int(d.Warning.sum())} asset-days with a persistent shortfall; {int(d.ConstraintViolation.sum())} controller violations.")
-            st.caption("Window = ceil(max exposure / Risk-On speed), 10 sessions for Balanced. Requires continuous healthy-market eligibility. Tolerance is the 2 percentage-point no-trade band; no arbitrary low-exposure threshold.")
-            st.dataframe(d[["Date", "Symbol", "Healthy", "Base", "Target", "Exposure", "AttainableFloor", "Shortfall", "Warning", "VolReduction", "DrawdownReduction", "EmergencyReduction"]].tail(250), hide_index=True, width="stretch")
-            st.subheader("V-shaped recovery: cost of the Risk-On speed limit")
-            st.caption("Ex-post diagnostic only: at least 8% fall from the prior 20-session high, a local trough, then at least 8% recovery within 20 sessions. Event selection may use future data; orders never do. Counterfactual removes only the upward speed limit, freezing the original trend, risk, floor and Emergency paths. Positive missed return means slower entry hurt; negative means it helped. Never an optimization target.")
-            if len(cached["recoveries"]): st.dataframe(cached["recoveries"], hide_index=True, width="stretch")
-            else: st.info("No qualifying V-shaped recoveries in this interval. The diagnostic is N/A, not zero loss.")
-            st.subheader("Healthy-bull participation by asset")
-            st.dataframe(d.loc[d.Healthy].groupby("Symbol")[["Base", "Target", "Exposure", "Shortfall"]].mean(), width="stretch")
+            st.write(f"{int(d.Warning.sum())} 个资产交易日存在持续的仓位缺口；{int(d.ConstraintViolation.sum())} 次仓位控制约束违规。")
+            st.caption("窗口 = ceil(最大仓位 / 加仓速度)，Balanced 为 10 个交易日。要求持续满足健康市场资格条件。容差为 2 个百分点的不交易区间；不设置任意的低仓位阈值。")
+            st.dataframe(d[["Date", "Symbol", "Healthy", "Base", "Target", "Exposure", "AttainableFloor", "Shortfall", "Warning", "VolReduction", "DrawdownReduction", "EmergencyReduction"]].tail(250), hide_index=True, width="stretch", column_config={"Date": "日期", "Symbol": "标的", "Healthy": "健康牛市资格", "Base": "基础仓位", "Target": "目标仓位", "Exposure": "实际仓位", "AttainableFloor": "可达到的参与下限", "Shortfall": "仓位缺口", "Warning": "参与度警告", "VolReduction": "波动率减仓", "DrawdownReduction": "回撤削减幅度", "EmergencyReduction": "紧急防守减仓"})
+            st.subheader("V 型恢复：加仓速度限制的代价")
+            st.caption("仅用于事后诊断：相对前 20 个交易日高点下跌至少 8%，形成局部低点，随后在 20 个交易日内回升至少 8%。事件筛选可能使用未来数据；交易指令绝不使用。反事实模拟仅取消加仓速度限制，原有趋势、风险、参与下限及紧急防守路径均固定。错失收益为正表示较慢入场造成损失，为负表示较慢入场有利。此诊断绝不作为优化目标。")
+            if len(cached["recoveries"]): st.dataframe(cached["recoveries"], hide_index=True, width="stretch", column_config={"Trough": "低点日期", "RecoveryEnd": "恢复结束日期", "Days": "交易日数", "PrecedingDecline": "此前跌幅", "BenchmarkRecovery": "基准恢复收益率", "QuantumRecovery": "Quantum 恢复收益率", "UnlimitedOnReplay": "取消加仓限速的重放收益率", "RiskOnMissedReturn": "加仓限速错失收益率"})
+            else: st.info("此区间内没有符合条件的 V 型恢复。该诊断为不适用，不代表损失为零。")
+            st.subheader("各资产的健康牛市参与度")
+            st.dataframe(d.loc[d.Healthy].groupby("Symbol")[["Base", "Target", "Exposure", "Shortfall"]].mean(), width="stretch", column_config={"Symbol": "标的", "Base": "基础仓位", "Target": "目标仓位", "Exposure": "实际仓位", "Shortfall": "仓位缺口"})
         with tab3:
-            st.subheader("Emergency event log")
-            st.dataframe(result.events, hide_index=True, width="stretch")
-            st.subheader("Cost attribution")
-            st.dataframe(h[["Commission", "SpreadCost", "SlippageCost", "Cost"]].sum().to_frame("Amount"), width="stretch")
-            st.subheader("Orders and decision attribution")
-            st.dataframe(result.decisions.tail(250), hide_index=True, width="stretch")
-            st.subheader("Fills")
-            st.dataframe(result.fills.tail(250), hide_index=True, width="stretch")
-            st.subheader("Closed holding cycles")
-            st.dataframe(result.cycles, hide_index=True, width="stretch")
-            st.caption(f"{meta['open_cycles']} open cycles are excluded from closed-cycle win rate. Additions and partial sales belong to one zero-to-zero holding cycle.")
+            st.subheader("紧急防守事件日志")
+            st.dataframe(result.events, hide_index=True, width="stretch", column_config={"Date": "日期", "SignalDate": "信号日期", "Symbol": "标的", "Event": "事件", "StructureBreak": "结构破坏", "Shock": "波动冲击", "Return1": "单日收益率", "Return5": "五日收益率", "Target": "目标仓位"})
+            st.subheader("成本归因")
+            st.dataframe(h[["Commission", "SpreadCost", "SlippageCost", "Cost"]].sum().to_frame("金额"), width="stretch", column_config={"Commission": "佣金", "SpreadCost": "价差成本", "SlippageCost": "滑点成本", "Cost": "总成本", "Symbol": "标的"})
+            st.subheader("订单与决策归因")
+            st.dataframe(result.decisions.tail(250), hide_index=True, width="stretch", column_config={"Date": "日期", "SignalDate": "信号日期", "Symbol": "标的", "Regime": "市场状态", "Base": "基础仓位", "Desired": "期望仓位", "Target": "目标仓位", "Emergency": "紧急防守", "DDMode": "回撤保护状态", "TrendReduction": "趋势减仓", "VolReduction": "波动率减仓", "DrawdownReduction": "回撤削减幅度", "FloorCredit": "参与下限补回仓位", "TransitionEffect": "仓位过渡影响", "EmergencyReduction": "紧急防守减仓", "Healthy": "健康牛市资格", "AttainableFloor": "可达到的参与下限", "DDPenalty": "回撤惩罚", "VolPenalty": "波动率惩罚", "DrawdownStandalone": "独立回撤减仓幅度", "FloorActive": "参与下限已启用", "EmergencyAge": "紧急防守持续天数", "EmergencyCalmDays": "紧急防守平静天数", "Explanation": "决策说明", "Trend": "趋势分数", "Sigma": "年化波动率", "Days": "交易日数", "QuantumReturn": "Quantum 收益率", "BenchmarkReturn": "基准收益率", "QuantumDD": "Quantum 回撤", "BenchmarkDD": "基准回撤", "Year": "年份", "Exposure": "实际仓位", "Shortfall": "仓位缺口", "Warning": "参与度警告", "Trough": "低点日期", "RecoveryEnd": "恢复结束日期", "PrecedingDecline": "此前跌幅", "BenchmarkRecovery": "基准恢复收益率", "QuantumRecovery": "Quantum 恢复收益率", "UnlimitedOnReplay": "取消加仓限速的重放收益率", "RiskOnMissedReturn": "加仓限速错失收益率", "Event": "事件", "StructureBreak": "结构破坏", "Shock": "波动冲击", "Return1": "单日收益率", "Return5": "五日收益率", "Commission": "佣金", "SpreadCost": "价差成本", "SlippageCost": "滑点成本", "Cost": "总成本", "Structure": "结构证据", "Momentum": "动量证据", "Slope": "斜率证据", "VolRatio": "波动率比值", "Trigger": "紧急防守触发", "PriorExposure": "前一收盘仓位", "OrderUnits": "订单单位数", "ClosePrice": "收盘价", "Budget": "资金预算占比", "ConstraintViolation": "参与约束违规", "Side": "交易方向", "Units": "单位数", "ReferencePrice": "参考价格", "FillPrice": "成交价格", "CashAfter": "成交后现金", "CashScale": "现金缩放系数", "Reason": "成交原因", "EntryDate": "入场日期", "ExitDate": "退出日期", "PnL": "盈亏", "HoldingDays": "持仓天数", "Experiment": "实验", "EmergencyTriggers": "紧急防守触发次数", "EmergencyDays": "紧急防守天数", "VolatilityProfile": "波动率分组", "AverageTarget": "平均目标仓位"})
+            st.subheader("成交记录")
+            st.dataframe(result.fills.tail(250), hide_index=True, width="stretch", column_config={"Date": "日期", "SignalDate": "信号日期", "Symbol": "标的", "Side": "交易方向", "Units": "单位数", "ReferencePrice": "参考价格", "FillPrice": "成交价格", "Commission": "佣金", "SpreadCost": "价差成本", "SlippageCost": "滑点成本", "CashAfter": "成交后现金", "CashScale": "现金缩放系数", "Reason": "成交原因"})
+            st.subheader("已结束的持仓周期")
+            st.dataframe(result.cycles, hide_index=True, width="stretch", column_config={"Symbol": "标的", "EntryDate": "入场日期", "PnL": "盈亏", "ExitDate": "退出日期", "HoldingDays": "持仓天数"})
+            st.caption(f"{meta['open_cycles']} 个未结束周期不计入已结束周期的胜率。加仓与部分卖出均归属于同一个从空仓开始到再次空仓结束的持仓周期。")
         with tab4:
-            st.write("Fixed one-at-a-time checks. Emergency thresholds are tested at −6%, −8%, −10% (frozen), −12%, −15%, with results broken out by prior-close annualized volatility below 20%, 20–40%, and above 40%.")
-            st.caption("Profile bands are descriptive labels. Empty profiles remain empty; they are not treated as successful tests. No threshold is assumed suitable for every asset.")
-            if st.button("Run parameter and cost sensitivity"):
-                with st.spinner("Running sensitivity across assets and volatility profiles…"):
+            st.write("使用固定的单因素测试。紧急防守阈值测试为 −6%、−8%、−10%（固定值）、−12%、−15%；结果按前一收盘时点的年化波动率分组：低于 20%、20–40% 和高于 40%。")
+            st.caption("波动率分组仅为描述性标签。空分组保持为空，不视为测试成功。不假定任何阈值适用于所有资产。")
+            if st.button("运行参数与成本敏感性分析"):
+                with st.spinner("正在对各资产与波动率分组运行敏感性分析…"):
                     cached["sensitivity"] = sensitivity(data, cfg, meta["start"], meta["end"], meta["initial"])
-            if "sensitivity" in cached: st.dataframe(cached["sensitivity"], hide_index=True, width="stretch")
+            if "sensitivity" in cached: st.dataframe(cached["sensitivity"], hide_index=True, width="stretch", column_config={"TotalReturn": "总收益率", "CAGR": "年化复合增长率", "MaxDrawdown": "最大回撤", "Volatility": "波动率", "Sharpe": "夏普比率", "Sortino": "索提诺比率", "Calmar": "卡玛比率", "AverageExposure": "平均仓位", "TimeInMarket": "持仓时间占比", "Turnover": "换手率", "TransactionCosts": "交易成本", "Fills": "成交笔数", "ClosedCycles": "已结束周期数", "OpenCycles": "未结束周期数", "WinRate": "胜率", "ProfitFactor": "盈利因子", "AverageHoldingDays": "平均持仓天数", "UpsideCapture": "上涨捕获率", "DownsideCapture": "下跌捕获率", "UpMonths": "上涨月份数", "DownMonths": "下跌月份数", "DrawdownReduction": "回撤削减幅度", "ComparedWith": "对照模型", "Interval": "区间", "Start": "开始日期", "End": "结束日期", "Symbol": "标的", "Experiment": "实验", "EmergencyTriggers": "紧急防守触发次数", "EmergencyDays": "紧急防守天数", "VolatilityProfile": "波动率分组", "Days": "交易日数", "AverageTarget": "平均目标仓位"})
     else:
-        st.subheader("Frozen configuration")
+        st.subheader("固定配置")
         st.json(meta)
-        st.markdown("""**Research contract**
+        st.markdown("""**研究约定**
 
-- Balanced is the design center. Presets express risk preferences, not optimized returns.
-- Identical complete calendars are required. Missing OHLCV or unavailable warmup rejects the run.
-- Yahoo data excludes New York's current date and can be revised by the provider. Export the input snapshot for reproducibility.
-- Current ticker lists do not establish point-in-time historical universe membership.
-- This is a daily adjusted-unit research model. No broker integration, intraday stop fills, guaranteed loss cap, or automatic universe selection.
-- Held-out performance must come from data not used to select rules. Synthetic tests and calendar-year summaries are not proof of an investable edge.
+- 以 Balanced 为设计中心。预设表达风险偏好，并非优化后的收益。
+- 必须使用完整且一致的交易日历。OHLCV 缺失或预热数据不足时拒绝运行。
+- Yahoo 数据不包含纽约当前日期，且数据提供方可能修订数据。请导出输入快照，以便复现。
+- 当前标的列表不能证明这些标的在历史各时点均属于当时的投资范围。
+- 这是基于日线复权单位的研究模型。不包含券商集成、日内止损成交、损失上限保证或自动选取投资范围。
+- 留出表现必须来自未用于选择规则的数据。合成测试和年度汇总不能证明存在可用于实盘投资的优势。
 """)
     tables = {"participation": cached["participation"], "v_recovery": cached["recoveries"],
               "chronological_intervals": chronological_diagnostics(result, benchmark),
@@ -1080,7 +1080,7 @@ Trend components are related price evidence, not independent probabilities. Emer
               "gross_history": cached["gross"].history}
     tables.update({k: cached[k] for k in ("ablation", "delta", "sensitivity") if k in cached})
     for s, frame in data.items(): tables["input_"+s.replace("/", "_")] = frame
-    st.download_button("Download reproducible research bundle", export_bundle(result, tables),
+    st.download_button("下载可复现的研究数据包", export_bundle(result, tables),
                        file_name="quantumsignal_v2_research.zip", mime="application/zip")
 
 
